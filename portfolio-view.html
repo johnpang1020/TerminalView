@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Portfolio — display</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,500;1,6..96,500&family=Karla:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg0: #0a0908;
+      --bg1: #141210;
+      --ink: #ebe6de;
+      --muted: #9a938a;
+      --accent: #c17f3a;
+      --accent-soft: rgba(193, 127, 58, 0.18);
+      --line: rgba(235, 230, 222, 0.12);
+      --shadow: rgba(0, 0, 0, 0.45);
+      --gain-pos: #8fb87a;
+      --gain-neg: #c97a6a;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: "Karla", system-ui, sans-serif;
+      font-size: 1rem;
+      line-height: 1.45;
+      color: var(--ink);
+      background: radial-gradient(120% 80% at 12% -10%, #1c1814 0%, var(--bg0) 55%) fixed;
+      overflow-x: hidden;
+    }
+
+    .grain {
+      pointer-events: none;
+      position: fixed;
+      inset: 0;
+      opacity: 0.085;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+      z-index: 0;
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: clamp(1.5rem, 5vw, 3.25rem) clamp(1.25rem, 4vw, 2rem) 3.5rem;
+    }
+
+    header {
+      display: grid;
+      gap: 0.75rem;
+      margin-bottom: clamp(1.75rem, 4vw, 2.75rem);
+      position: relative;
+    }
+
+    .eyebrow {
+      font-size: 0.72rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 600;
+      animation: rise 0.9s ease both;
+    }
+
+    h1 {
+      font-family: "Bodoni Moda", Georgia, serif;
+      font-weight: 500;
+      font-size: clamp(2.2rem, 6vw, 3.35rem);
+      line-height: 1.05;
+      margin: 0;
+      letter-spacing: -0.02em;
+      animation: rise 0.95s ease 0.06s both;
+    }
+
+    .sub {
+      max-width: 36rem;
+      color: var(--muted);
+      font-size: 0.98rem;
+      animation: rise 1s ease 0.12s both;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.25rem;
+      align-items: baseline;
+      margin-top: 0.25rem;
+      animation: rise 1.05s ease 0.18s both;
+    }
+
+    .meta time {
+      font-variant-numeric: tabular-nums;
+      color: var(--ink);
+      font-weight: 600;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 0.15rem;
+    }
+
+    .meta span.dim { color: var(--muted); font-weight: 400; }
+
+    .sheet-check {
+      font-size: 0.78rem;
+      color: var(--muted);
+      width: 100%;
+      margin-top: 0.15rem;
+    }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.35rem;
+      animation: rise 1.08s ease 0.2s both;
+    }
+
+    .summary-card {
+      background: linear-gradient(150deg, rgba(22, 20, 18, 0.88), rgba(12, 11, 10, 0.65));
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1rem 1.15rem;
+      box-shadow: 0 12px 32px var(--shadow);
+    }
+
+    .summary-card h3 {
+      margin: 0 0 0.65rem;
+      font-size: 0.7rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .summary-card dl {
+      margin: 0;
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .summary-card dt {
+      font-size: 0.65rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .summary-card dd {
+      margin: 0;
+      font-variant-numeric: tabular-nums;
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
+    .summary-card dd.na { color: var(--muted); font-weight: 500; }
+
+    .gain-pos { color: var(--gain-pos); }
+    .gain-neg { color: var(--gain-neg); }
+
+    .slant {
+      position: absolute;
+      right: -2rem;
+      top: 0.25rem;
+      width: min(42vw, 220px);
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent));
+      transform: rotate(-8deg);
+      opacity: 0.65;
+      pointer-events: none;
+    }
+
+    .panel {
+      background: linear-gradient(145deg, rgba(22, 20, 18, 0.92), rgba(12, 11, 10, 0.72));
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      box-shadow: 0 28px 60px var(--shadow);
+      overflow: hidden;
+      animation: rise 1.1s ease 0.22s both;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 1rem;
+      padding: 1rem 1.25rem 0.85rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-size: 0.78rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .panel-head .hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    ul.holdings {
+      list-style: none;
+      margin: 0;
+      padding: 0.35rem 0 0;
+    }
+
+    li.row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) minmax(5.5rem, auto);
+      gap: 0.85rem 1.15rem;
+      align-items: start;
+      padding: 0.95rem 1.25rem;
+      border-top: 1px solid var(--line);
+      opacity: 0;
+      animation: rise 0.75s ease forwards;
+    }
+
+    li.row:first-of-type { border-top: none; }
+
+    li.row:hover {
+      background: linear-gradient(90deg, var(--accent-soft), transparent 55%);
+    }
+
+    .pill {
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+      font-weight: 600;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.2rem 0.45rem;
+      min-width: 2.25rem;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      margin-top: 0.15rem;
+    }
+
+    .row-body {
+      min-width: 0;
+      display: grid;
+      gap: 0.45rem;
+    }
+
+    .name {
+      font-family: "Bodoni Moda", Georgia, serif;
+      font-size: clamp(1.05rem, 2.2vw, 1.28rem);
+      line-height: 1.15;
+      word-break: break-word;
+      margin: 0;
+    }
+
+    dl.metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, auto));
+      gap: 0.45rem 1.25rem;
+      margin: 0;
+      font-size: 0.82rem;
+    }
+
+    dl.metrics > div {
+      display: grid;
+      gap: 0.12rem;
+      min-width: 0;
+    }
+
+    dl.metrics dt {
+      margin: 0;
+      font-size: 0.65rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    dl.metrics dd {
+      margin: 0;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    dl.metrics dd.na {
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    dl.metrics.metrics--pnl {
+      grid-column: 1 / -1;
+      margin-top: 0.15rem;
+      padding-top: 0.5rem;
+      border-top: 1px dashed var(--line);
+    }
+
+    dl.metrics.metrics--pnl dd.gain-pos,
+    dl.metrics.metrics--pnl dd.gain-neg {
+      font-weight: 600;
+    }
+
+    .row-aside {
+      text-align: right;
+      min-width: 5rem;
+    }
+
+    .row-aside .aside-label {
+      display: block;
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.2rem;
+    }
+
+    .price {
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      font-size: 1rem;
+      color: var(--ink);
+      white-space: nowrap;
+      display: block;
+    }
+
+    .price.na { color: var(--muted); font-weight: 500; }
+
+    ul.holdings.holdings--no-last li.row {
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .panel + .panel { margin-top: 1.25rem; }
+
+    .bitcoin-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem 1.5rem;
+      padding: 1rem 1.25rem 1.2rem;
+    }
+
+    .bitcoin-grid .bc-title-wrap {
+      grid-column: 1 / -1;
+    }
+
+    .bitcoin-grid h3 {
+      margin: 0 0 0.25rem;
+      font-family: "Bodoni Moda", Georgia, serif;
+      font-size: 1.35rem;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+    }
+
+    .bitcoin-grid .bc-caption {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .bc-stat dt {
+      margin: 0 0 0.12rem;
+      font-size: 0.65rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .bc-stat dd {
+      margin: 0;
+      font-variant-numeric: tabular-nums;
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
+    .bc-stat dd.na { color: var(--muted); font-weight: 500; }
+
+    footer {
+      margin-top: 1.75rem;
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      animation: rise 1.15s ease 0.28s both;
+    }
+
+    footer code {
+      font-size: 0.78em;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.05);
+      padding: 0.08rem 0.28rem;
+      border-radius: 3px;
+      border: 1px solid var(--line);
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 720px) {
+      li.row {
+        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-rows: auto auto;
+      }
+      .row-aside {
+        grid-column: 1 / -1;
+        text-align: left;
+        display: flex;
+        align-items: baseline;
+        gap: 0.65rem;
+        padding-left: calc(2.25rem + 0.85rem);
+      }
+      .row-aside .aside-label { margin-bottom: 0; }
+      dl.metrics {
+        grid-template-columns: 1fr 1fr;
+      }
+      .bitcoin-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+      li.row { opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div class="wrap">
+    <header>
+      <div class="slant" aria-hidden="true"></div>
+      <p class="eyebrow">Personal · Read-only</p>
+      <h1 id="title">Portfolio</h1>
+      <p class="sub" id="subtitle">Workbook layout: <strong>A6:A24</strong> name · <strong>B6:B24</strong> shares · <strong>C6:C24</strong> cost/share · <strong>D6:D24</strong> total cost (USD). Row <strong>30</strong>: Bitcoin label, amount, cost.</p>
+      <div class="meta">
+        <time id="as-of" datetime=""></time>
+        <span class="dim" id="count-line"></span>
+      </div>
+      <p class="sheet-check" id="sheet-total-line" hidden></p>
+    </header>
+
+    <section class="summary-strip" id="summary-strip" aria-label="Portfolio totals" hidden></section>
+
+    <section class="panel" aria-labelledby="holdings-heading">
+      <div class="panel-head">
+        <h2 id="holdings-heading">Holdings</h2>
+        <p class="hint">Display only · no trading actions</p>
+      </div>
+      <ul class="holdings" id="list" role="list"></ul>
+    </section>
+
+    <section class="panel" id="bitcoin-section" aria-labelledby="bitcoin-heading" hidden>
+      <div class="panel-head">
+        <h2 id="bitcoin-heading">Digital asset</h2>
+        <p class="hint">Row 30</p>
+      </div>
+      <div class="bitcoin-grid" id="bitcoin-block"></div>
+    </section>
+
+    <footer>
+      One step: <code>python refresh_portfolio.py</code> (prices → HTML). Or <code>python refresh_portfolio.py --open</code>. Manual: <code>update_portfolio_prices.py</code> then <code>export_portfolio_view.py</code>. Flags: <code>--no-btc-spot</code>, <code>--no-prices</code>, <code>--prices-range L6:L24</code>.
+    </footer>
+  </div>
+
+  <!-- PORTFOLIO_JSON_START -->
+  <script type="application/json" id="portfolio-embed">
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+{
+  "meta": {
+    "title": "Portfolio",
+    "subtitle": "Rows 6–24: A name · B shares · C cost/share · D total cost · M last — with market value & unrealized P&L",
+    "asOf": "2026-04-20T13:28:43",
+    "sheetTotalCostUsd": 25763.0
+  },
+  "summary": {
+    "equities": {
+      "label": "Stocks & ETFs",
+      "costBasisUsd": 25763.0,
+      "marketValueUsd": 28531.96,
+      "unrealizedGainUsd": 2768.96
+    },
+    "bitcoin": {
+      "label": "Bitcoin",
+      "costBasisUsd": 977.64,
+      "marketValueUsd": 948.5,
+      "unrealizedGainUsd": -29.14
+    },
+    "grand": {
+      "label": "Combined",
+      "costBasisUsd": 26740.64,
+      "marketValueUsd": 29480.46,
+      "unrealizedGainUsd": 2739.82
+    }
+  },
+  "rows": [
+    {
+      "row": 6,
+      "name": "O",
+      "shares": 112.0,
+      "costPerShare": 55.581,
+      "totalCostUsd": 6225.072,
+      "lastPrice": 64.64,
+      "marketValueUsd": 7239.68,
+      "gainUsd": 1014.61,
+      "gainPct": 16.3
+    },
+    {
+      "row": 7,
+      "name": "JEPI",
+      "shares": 63.0,
+      "costPerShare": 55.689,
+      "totalCostUsd": 3508.407,
+      "lastPrice": 57.59,
+      "marketValueUsd": 3628.17,
+      "gainUsd": 119.76,
+      "gainPct": 3.41
+    },
+    {
+      "row": 8,
+      "name": "BNS",
+      "shares": 35.0,
+      "costPerShare": 65.353,
+      "totalCostUsd": 2287.355,
+      "lastPrice": 75.0,
+      "marketValueUsd": 2625.0,
+      "gainUsd": 337.64,
+      "gainPct": 14.76
+    },
+    {
+      "row": 9,
+      "name": "SCHD",
+      "shares": 19.0,
+      "costPerShare": 26.873,
+      "totalCostUsd": 510.587,
+      "lastPrice": 30.81,
+      "marketValueUsd": 585.39,
+      "gainUsd": 74.8,
+      "gainPct": 14.65
+    },
+    {
+      "row": 10,
+      "name": "TSM",
+      "shares": 5.0,
+      "costPerShare": 281.014,
+      "totalCostUsd": 1405.07,
+      "lastPrice": 363.35,
+      "marketValueUsd": 1816.75,
+      "gainUsd": 411.68,
+      "gainPct": 29.3
+    },
+    {
+      "row": 11,
+      "name": "MSFT",
+      "shares": 8.0,
+      "costPerShare": 396.419,
+      "totalCostUsd": 3171.352,
+      "lastPrice": 420.26,
+      "marketValueUsd": 3362.08,
+      "gainUsd": 190.73,
+      "gainPct": 6.01
+    },
+    {
+      "row": 12,
+      "name": "DXYZ",
+      "shares": 8.0,
+      "costPerShare": 27.8578,
+      "totalCostUsd": 222.8624,
+      "lastPrice": 29.03,
+      "marketValueUsd": 232.24,
+      "gainUsd": 9.38,
+      "gainPct": 4.21
+    },
+    {
+      "row": 13,
+      "name": "CSPX.L",
+      "shares": 5.6302,
+      "costPerShare": 724.3212,
+      "totalCostUsd": 4078.0732,
+      "lastPrice": 756.16,
+      "marketValueUsd": 4257.33,
+      "gainUsd": 179.26,
+      "gainPct": 4.4
+    },
+    {
+      "row": 14,
+      "name": "ONDS",
+      "shares": 5.0,
+      "costPerShare": 11.803,
+      "totalCostUsd": 59.015,
+      "lastPrice": 10.0,
+      "marketValueUsd": 50.0,
+      "gainUsd": -9.02,
+      "gainPct": -15.28
+    },
+    {
+      "row": 15,
+      "name": "CRCL",
+      "shares": 3.0,
+      "costPerShare": 82.637,
+      "totalCostUsd": 247.911,
+      "lastPrice": 107.46,
+      "marketValueUsd": 322.38,
+      "gainUsd": 74.47,
+      "gainPct": 30.04
+    },
+    {
+      "row": 16,
+      "name": "NVDA",
+      "shares": 3.6,
+      "costPerShare": 181.197,
+      "totalCostUsd": 652.3092,
+      "lastPrice": 198.35,
+      "marketValueUsd": 714.06,
+      "gainUsd": 61.75,
+      "gainPct": 9.47
+    },
+    {
+      "row": 17,
+      "name": "TEM",
+      "shares": 3.0,
+      "costPerShare": 52.42,
+      "totalCostUsd": 157.26,
+      "lastPrice": 54.42,
+      "marketValueUsd": 163.26,
+      "gainUsd": 6.0,
+      "gainPct": 3.82
+    },
+    {
+      "row": 18,
+      "name": "SMH",
+      "shares": 3.1,
+      "costPerShare": 394.382,
+      "totalCostUsd": 1222.5842,
+      "lastPrice": 454.8,
+      "marketValueUsd": 1409.88,
+      "gainUsd": 187.3,
+      "gainPct": 15.32
+    },
+    {
+      "row": 19,
+      "name": "VRT",
+      "shares": 1.0,
+      "costPerShare": 210.02,
+      "totalCostUsd": 210.02,
+      "lastPrice": 294.13,
+      "marketValueUsd": 294.13,
+      "gainUsd": 84.11,
+      "gainPct": 40.05
+    },
+    {
+      "row": 20,
+      "name": "ALAB",
+      "shares": 4.0,
+      "costPerShare": 164.71,
+      "totalCostUsd": 658.84,
+      "lastPrice": 174.0,
+      "marketValueUsd": 696.0,
+      "gainUsd": 37.16,
+      "gainPct": 5.64
+    },
+    {
+      "row": 21,
+      "name": "VST",
+      "shares": 7.0,
+      "costPerShare": 163.755,
+      "totalCostUsd": 1146.285,
+      "lastPrice": 162.23,
+      "marketValueUsd": 1135.61,
+      "gainUsd": -10.68,
+      "gainPct": -0.93
+    },
+    {
+      "row": 22,
+      "name": "Total",
+      "shares": null,
+      "costPerShare": null,
+      "totalCostUsd": 25763.003,
+      "lastPrice": null,
+      "marketValueUsd": null,
+      "gainUsd": null,
+      "gainPct": null
+    },
+    {
+      "row": 23,
+      "name": "",
+      "shares": null,
+      "costPerShare": null,
+      "totalCostUsd": null,
+      "lastPrice": null,
+      "marketValueUsd": null,
+      "gainUsd": null,
+      "gainPct": null
+    },
+    {
+      "row": 24,
+      "name": "Webull Cost",
+      "shares": 20646.97,
+      "costPerShare": null,
+      "totalCostUsd": null,
+      "lastPrice": null,
+      "marketValueUsd": null,
+      "gainUsd": null,
+      "gainPct": null
+    }
+  ],
+  "bitcoin": {
+    "row": 30,
+    "label": "Bitcoin",
+    "amount": 0.01278341,
+    "totalCostUsd": 977.6411929294,
+    "spotPriceUsd": 74198.02,
+    "marketValueUsd": 948.5,
+    "gainUsd": -29.14,
+    "gainPct": -2.98
+  }
+}
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  </script>
+  <!-- PORTFOLIO_JSON_END -->
+
+  <script>
+    (function () {
+      function fmtMoney(n) {
+        if (n === null || n === undefined || n === "" || (typeof n === "number" && !isFinite(n))) return null;
+        var num = typeof n === "number" ? n : parseFloat(String(n).replace(/,/g, ""));
+        if (isNaN(num)) return null;
+        return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      function fmtShares(n) {
+        if (n === null || n === undefined || n === "" || (typeof n === "number" && !isFinite(n))) return null;
+        var num = typeof n === "number" ? n : parseFloat(String(n).replace(/,/g, ""));
+        if (isNaN(num)) return null;
+        var opts = { minimumFractionDigits: 0, maximumFractionDigits: 6 };
+        if (Math.abs(num - Math.round(num)) < 1e-9) opts.maximumFractionDigits = 0;
+        return num.toLocaleString(undefined, opts);
+      }
+
+      function fmtBtc(n) {
+        if (n === null || n === undefined || n === "" || (typeof n === "number" && !isFinite(n))) return null;
+        var num = typeof n === "number" ? n : parseFloat(String(n).replace(/,/g, ""));
+        if (isNaN(num)) return null;
+        return num.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 });
+      }
+
+      function fmtPct(n) {
+        if (n === null || n === undefined || (typeof n === "number" && !isFinite(n))) return null;
+        var num = Number(n);
+        var abs = Math.abs(num).toFixed(2);
+        return (num > 0 ? "+" : num < 0 ? "−" : "") + abs + "%";
+      }
+
+      function gainClass(n) {
+        if (n == null || !isFinite(n)) return "";
+        return n >= 0 ? "gain-pos" : "gain-neg";
+      }
+
+      function ddWithValue(text, isNA) {
+        var dd = document.createElement("dd");
+        dd.textContent = text;
+        if (isNA) dd.classList.add("na");
+        return dd;
+      }
+
+      function isTotalRow(r) {
+        return String(r.name || "").trim().toLowerCase() === "total";
+      }
+
+      function summaryStat(label, valueStr, gainAmount) {
+        var wrap = document.createElement("div");
+        var dt = document.createElement("dt");
+        dt.textContent = label;
+        var dd = document.createElement("dd");
+        if (valueStr == null || valueStr === "—") {
+          dd.classList.add("na");
+          dd.textContent = "—";
+        } else {
+          dd.textContent = valueStr;
+        }
+        if (gainAmount != null && isFinite(gainAmount)) {
+          dd.classList.add(gainClass(gainAmount));
+        }
+        wrap.appendChild(dt);
+        wrap.appendChild(dd);
+        return wrap;
+      }
+
+      function renderSummary(data) {
+        var strip = document.getElementById("summary-strip");
+        var s = data.summary;
+        if (!s) {
+          strip.hidden = true;
+          return;
+        }
+        strip.hidden = false;
+        strip.innerHTML = "";
+
+        function card(block) {
+          if (!block) return;
+          var art = document.createElement("article");
+          art.className = "summary-card";
+          var h = document.createElement("h3");
+          h.textContent = block.label || "—";
+          var dl = document.createElement("dl");
+          var costStr = fmtMoney(block.costBasisUsd);
+          var mktStr = fmtMoney(block.marketValueUsd);
+          var pnl = block.unrealizedGainUsd;
+          var pnlStr = pnl != null && isFinite(pnl)
+            ? ((pnl >= 0 ? "+" : "−") + "$" + fmtMoney(Math.abs(pnl)))
+            : null;
+          dl.appendChild(summaryStat("Cost basis", costStr != null ? ("$" + costStr) : null, null));
+          dl.appendChild(summaryStat("Market value", mktStr != null ? ("$" + mktStr) : null, null));
+          var pnlWrap = summaryStat("Unrealized P&L", pnlStr != null ? pnlStr : null, pnl);
+          dl.appendChild(pnlWrap);
+          art.appendChild(h);
+          art.appendChild(dl);
+          strip.appendChild(art);
+        }
+
+        card(s.equities);
+        card(s.bitcoin);
+        card(s.grand);
+      }
+
+      function bcStat(label, text, isNA, gainCls) {
+        var div = document.createElement("div");
+        div.className = "bc-stat";
+        var dt = document.createElement("dt");
+        dt.textContent = label;
+        var dd = document.createElement("dd");
+        dd.textContent = text;
+        if (isNA) dd.classList.add("na");
+        if (gainCls) dd.classList.add(gainCls);
+        div.appendChild(dt);
+        div.appendChild(dd);
+        return div;
+      }
+
+      var raw = document.getElementById("portfolio-embed").textContent.trim();
+      var data;
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        document.getElementById("list").innerHTML = "<li class='row'><p class='name'>Invalid portfolio JSON. Run export script or fix embedded data.</p></li>";
+        return;
+      }
+
+      var meta = data.meta || {};
+      document.getElementById("title").textContent = meta.title || "Portfolio";
+      if (meta.subtitle) {
+        document.getElementById("subtitle").textContent = meta.subtitle;
+      }
+
+      var sheetLine = document.getElementById("sheet-total-line");
+      if (meta.sheetTotalCostUsd != null && fmtMoney(meta.sheetTotalCostUsd) != null) {
+        sheetLine.hidden = false;
+        sheetLine.textContent = "Sheet subtotal row (\"Total\") cost: $" + fmtMoney(meta.sheetTotalCostUsd);
+      } else {
+        sheetLine.hidden = true;
+      }
+
+      var asOf = meta.asOf ? new Date(meta.asOf) : null;
+      var timeEl = document.getElementById("as-of");
+      if (asOf && !isNaN(asOf.getTime())) {
+        timeEl.setAttribute("datetime", asOf.toISOString());
+        timeEl.textContent = "As of " + asOf.toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short"
+        });
+      } else {
+        timeEl.textContent = "";
+      }
+
+      renderSummary(data);
+
+      var rows = Array.isArray(data.rows) ? data.rows : [];
+      var hasLast = rows.some(function (r) {
+        if (!r) return false;
+        if (Object.prototype.hasOwnProperty.call(r, "lastPrice")) return true;
+        if (Object.prototype.hasOwnProperty.call(r, "price")) return true;
+        return false;
+      });
+      var hasPnl = rows.some(function (r) {
+        return r && (r.marketValueUsd != null || r.gainUsd != null || r.gainPct != null);
+      });
+      var filled = rows.filter(function (r) {
+        if (!r) return false;
+        var n = String(r.name || "").trim();
+        return n.length > 0 && n.toLowerCase() !== "total";
+      }).length;
+      var denom = rows.filter(function (r) {
+        return r && String(r.name || "").trim().toLowerCase() !== "total";
+      }).length;
+      document.getElementById("count-line").textContent =
+        denom ? filled + " holdings · " + denom + " rows" : "";
+
+      var list = document.getElementById("list");
+      list.classList.toggle("holdings--no-last", !hasLast);
+      list.innerHTML = "";
+      var delay = 0.28;
+      rows.forEach(function (r, i) {
+        if (!r) return;
+        var name = String(r.name || "").trim();
+        var li = document.createElement("li");
+        li.className = "row";
+        li.style.animationDelay = (delay + i * 0.04) + "s";
+        li.setAttribute("role", "listitem");
+
+        var pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = String(r.row != null ? r.row : 6 + i);
+        pill.setAttribute("aria-hidden", "true");
+
+        var body = document.createElement("div");
+        body.className = "row-body";
+
+        var nameEl = document.createElement("p");
+        nameEl.className = "name";
+        nameEl.textContent = name || "—";
+
+        var metrics = document.createElement("dl");
+        metrics.className = "metrics";
+
+        var g1 = document.createElement("div");
+        var dt1 = document.createElement("dt");
+        dt1.textContent = "Shares";
+        g1.appendChild(dt1);
+        var sh = fmtShares(r.shares);
+        g1.appendChild(ddWithValue(sh != null ? sh : "—", sh == null));
+
+        var g2 = document.createElement("div");
+        var dt2 = document.createElement("dt");
+        dt2.textContent = "Cost / sh";
+        g2.appendChild(dt2);
+        var cps = fmtMoney(r.costPerShare);
+        g2.appendChild(ddWithValue(cps != null ? cps : "—", cps == null));
+
+        var g3 = document.createElement("div");
+        var dt3 = document.createElement("dt");
+        dt3.textContent = "Total cost";
+        g3.appendChild(dt3);
+        var tc = fmtMoney(r.totalCostUsd);
+        g3.appendChild(ddWithValue(tc != null ? ("$" + tc) : "—", tc == null));
+
+        metrics.appendChild(g1);
+        metrics.appendChild(g2);
+        metrics.appendChild(g3);
+
+        body.appendChild(nameEl);
+        body.appendChild(metrics);
+
+        if (hasPnl && !isTotalRow(r)) {
+          var pnlDl = document.createElement("dl");
+          pnlDl.className = "metrics metrics--pnl";
+
+          var p1 = document.createElement("div");
+          var pt1 = document.createElement("dt");
+          pt1.textContent = "Market value";
+          p1.appendChild(pt1);
+          var mv = fmtMoney(r.marketValueUsd);
+          p1.appendChild(ddWithValue(mv != null ? ("$" + mv) : "—", mv == null));
+
+          var p2 = document.createElement("div");
+          var pt2 = document.createElement("dt");
+          pt2.textContent = "P&L ($)";
+          p2.appendChild(pt2);
+          var gUsd = r.gainUsd;
+          var pd2 = document.createElement("dd");
+          if (gUsd != null && isFinite(gUsd)) {
+            pd2.textContent = (gUsd >= 0 ? "+" : "−") + "$" + fmtMoney(Math.abs(gUsd));
+            pd2.className = gainClass(gUsd);
+          } else {
+            pd2.textContent = "—";
+            pd2.classList.add("na");
+          }
+          p2.appendChild(pd2);
+
+          var p3 = document.createElement("div");
+          var pt3 = document.createElement("dt");
+          pt3.textContent = "P&L (%)";
+          p3.appendChild(pt3);
+          var gp = r.gainPct;
+          var pd3 = document.createElement("dd");
+          if (gp != null && isFinite(gp)) {
+            pd3.textContent = fmtPct(gp);
+            pd3.className = gainClass(gp);
+          } else {
+            pd3.textContent = "—";
+            pd3.classList.add("na");
+          }
+          p3.appendChild(pd3);
+
+          pnlDl.appendChild(p1);
+          pnlDl.appendChild(p2);
+          pnlDl.appendChild(p3);
+          body.appendChild(pnlDl);
+        }
+
+        li.appendChild(pill);
+        li.appendChild(body);
+        if (hasLast) {
+          var aside = document.createElement("div");
+          aside.className = "row-aside";
+          var asideL = document.createElement("span");
+          asideL.className = "aside-label";
+          asideL.textContent = "Last";
+          var priceEl = document.createElement("span");
+          priceEl.className = "price";
+          var lp = Object.prototype.hasOwnProperty.call(r, "lastPrice")
+            ? r.lastPrice
+            : r.price;
+          var lpFmt = fmtMoney(lp);
+          if (lpFmt == null) {
+            priceEl.classList.add("na");
+            priceEl.textContent = "—";
+          } else {
+            priceEl.textContent = lpFmt;
+          }
+          aside.appendChild(asideL);
+          aside.appendChild(priceEl);
+          li.appendChild(aside);
+        }
+        list.appendChild(li);
+      });
+
+      var btcSec = document.getElementById("bitcoin-section");
+      var btcBlock = document.getElementById("bitcoin-block");
+      var btc = data.bitcoin;
+      if (btc && (btc.label || btc.amount != null || btc.totalCostUsd != null)) {
+        btcSec.hidden = false;
+        btcBlock.innerHTML = "";
+        var colTitle = document.createElement("div");
+        colTitle.className = "bc-title-wrap";
+        var bh = document.createElement("h3");
+        bh.textContent = String(btc.label || "Bitcoin");
+        var cap = document.createElement("p");
+        cap.className = "bc-caption";
+        cap.textContent = btc.row ? "Sheet row " + btc.row : "";
+        colTitle.appendChild(bh);
+        if (cap.textContent) colTitle.appendChild(cap);
+
+        var aFmt = fmtBtc(btc.amount);
+        var spotFmt = fmtMoney(btc.spotPriceUsd);
+        var mktFmt = fmtMoney(btc.marketValueUsd);
+        var cFmt = fmtMoney(btc.totalCostUsd);
+        var gUsd = btc.gainUsd;
+        var gPct = btc.gainPct;
+        var pnlTxt = null;
+        var pnlCls = "";
+        if (gUsd != null && isFinite(gUsd)) {
+          pnlTxt = (gUsd >= 0 ? "+" : "−") + "$" + fmtMoney(Math.abs(gUsd));
+          if (gPct != null && isFinite(gPct)) {
+            pnlTxt += " (" + fmtPct(gPct) + ")";
+          }
+          pnlCls = gainClass(gUsd);
+        }
+
+        btcBlock.appendChild(colTitle);
+        btcBlock.appendChild(bcStat("Amount (BTC)", aFmt != null ? aFmt : "—", aFmt == null, ""));
+        btcBlock.appendChild(bcStat("Spot (USD)", spotFmt != null ? ("$" + spotFmt) : "—", spotFmt == null, ""));
+        btcBlock.appendChild(bcStat("Market value", mktFmt != null ? ("$" + mktFmt) : "—", mktFmt == null, ""));
+        btcBlock.appendChild(bcStat("Cost basis", cFmt != null ? ("$" + cFmt) : "—", cFmt == null, ""));
+        var pnlDiv = document.createElement("div");
+        pnlDiv.className = "bc-stat";
+        var pnlDt = document.createElement("dt");
+        pnlDt.textContent = "Unrealized P&L";
+        var pnlDd = document.createElement("dd");
+        if (pnlTxt) {
+          pnlDd.textContent = pnlTxt;
+          if (pnlCls) pnlDd.classList.add(pnlCls);
+        } else {
+          pnlDd.classList.add("na");
+          pnlDd.textContent = "—";
+        }
+        pnlDiv.appendChild(pnlDt);
+        pnlDiv.appendChild(pnlDd);
+        btcBlock.appendChild(pnlDiv);
+      } else {
+        btcSec.hidden = true;
+      }
+    })();
+  </script>
+</body>
+</html>

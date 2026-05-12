@@ -1,0 +1,5 @@
+./portfolio.xlsx
+./update_portfolio_prices.py
+./export_portfolio_view.py
+./portfolio-view.html
+./refresh_portfolio.py
