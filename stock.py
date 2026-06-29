@@ -1,34 +1,75 @@
-"""Fetch selected market prices using yfinance."""
+"""Fetch selected market prices safely and instantly using yfinance.
+
+Rates/credit block uses Yahoo only (no FRED) to avoid overnight data lag during
+US session — critical when HK-evening selloffs move HYG/IEF before FRED updates.
+"""
 
 import argparse
 import math
+import os
 import time
 from datetime import datetime
 
+import pandas as pd
+import requests
 import yfinance as yf
 
-# Trailing P/E shown in output for these symbols only (Yahoo keys: trailingPE).
-PE_TICKERS = frozenset(
-    {
-        "NVDA",
-        "MSFT",
-        "SMH",
-        "VRT",
-        "ALAB",
-        "TSM",
-        "GOOGL",
-        "VOO",
-        "SEI ",
-        "CSPX.L",
-        "MU",
-    }
+PE_TICKERS = {
+    "TSM",
+    "MSFT",
+    "CSPX.L",
+    "CRCL",
+    "NVDA",
+    "SMH",
+    "VRT",
+    "ALAB",
+    "SEI",
+    "NASA",
+    "MCD",
+    "SCHG",
+    "BTC-USD",
+    "USO",
+    "^VIX",
+    "NOK",
+    "IBM",
+    "IREN",
+}
+MACRO_TICKERS = ["^TNX", "2YY=F", "^IRX", "SR3=F", "HYG", "IEF"]
+ALL_STOCKS = [
+    "TSM",
+    "MSFT",
+    "CSPX.L",
+    "CRCL",
+    "NVDA",
+    "SMH",
+    "VRT",
+    "ALAB",
+    "SEI",
+    "NASA",
+    "MCD",
+    "SCHG",
+    "BTC-USD",
+    "USO",
+    "^VIX",
+    "NOK",
+    "IBM",
+    "IREN",
+]
+HISTORY_PERIOD = "1mo"
+ROLLING_WINDOW = 5
+CREDIT_SPREAD_SIGNAL_BPS = 220
+CREDIT_VELOCITY_SIGNAL_BPS = 20
+SIGNAL_BANNER = "!" * 60
+EXECUTION_ALERT_MSG = (
+    "【核彈級買點】指標已達標，立刻登入 IBKR 賣出 SGOV，分批滿倉 SMH！"
 )
+ADJ_CLOSE_SYMBOLS = frozenset({"HYG", "IEF", "SGOV"})
 
 
 def _parse_trailing_pe(raw):
     """Return float P/E or None; negative values kept (loss-making)."""
     if raw is None:
-        return None  # type: ignore
+        return None
     try:
         val = float(raw)
     except (TypeError, ValueError):
@@ -38,42 +79,165 @@ def _parse_trailing_pe(raw):
     return val
 
 
-def get_cspx_price():
-    """Return current price and basic info for configured tickers."""
-    stocks = [
-        "CSPX.L",
-        "NVDA",
-        "MSFT",
-        "SMH",
-        "VRT",
-        "BTC-USD",
-        "USO",
-        "^VIX",
-        "ALAB",
-        "TSM",
-        "GOOGL",
-        "VOO",
-        "SEI ",
-        "MU",
-    ]
-    prices = []
-    for stock in stocks:
-        ticker = yf.Ticker(stock)
-        info = ticker.info
-        price = info.get("regularMarketPrice") or info.get("previousClose")
-        currency = info.get("currency", "USD")
-        name = info.get("shortName") or info.get("longName") or stock
-        row = {"name": name, "price": price, "currency": currency}
-        if stock in PE_TICKERS:
-            row["trailing_pe"] = _parse_trailing_pe(info.get("trailingPE"))
-        prices.append(row)
-    return prices
+def _price_series(hist_df, symbol, use_adj=False):
+    """Return cleaned price series; bond ETFs use Adj Close to skip ex-div gaps."""
+    try:
+        block = hist_df[symbol]
+        if use_adj and "Adj Close" in block.columns:
+            series = block["Adj Close"].dropna()
+        else:
+            series = block["Close"].dropna()
+        return series if not series.empty else None
+    except Exception:
+        return None
 
 
-def _format_pe_suffix(data: dict) -> str:
-    if "trailing_pe" not in data:
+def _series_for_symbol(hist_df, symbol):
+    return _price_series(hist_df, symbol, use_adj=symbol in ADJ_CLOSE_SYMBOLS)
+
+
+def fetch_all_market_data():
+    """Bulk download prices, fundamentals, and macro history (Yahoo only)."""
+    all_symbols = list(set(ALL_STOCKS + MACRO_TICKERS))
+    hist_df = yf.download(
+        all_symbols, period=HISTORY_PERIOD, group_by="ticker", progress=False
+    )
+
+    prices_map = {}
+    for sym in all_symbols:
+        series = _series_for_symbol(hist_df, sym)
+        if series is None:
+            series = _price_series(hist_df, sym, use_adj=False)
+        prices_map[sym] = float(series.iloc[-1]) if series is not None else None
+
+    tickers_batch = yf.Tickers(all_symbols)
+    pe_map = {}
+    hyg_yield = None
+    for sym in all_symbols:
+        try:
+            info = tickers_batch.tickers[sym].info
+            if sym in PE_TICKERS:
+                pe_map[sym] = _parse_trailing_pe(info.get("trailingPE"))
+            if sym == "HYG":
+                raw_yield = info.get("yield")
+                if raw_yield is not None:
+                    hyg_yield = float(raw_yield) * 100
+        except Exception:
+            pass
+
+    return prices_map, pe_map, hyg_yield, hist_df
+
+
+def _relative_return_bps(series, days=1):
+    """Price return over N sessions, in bps."""
+    if series is None or len(series) <= days:
+        return None
+    return (series.iloc[-1] / series.iloc[-1 - days] - 1) * 10000
+
+
+def _build_credit_spread_series(hyg_series, ief_series, tnx_series, hyg_yield):
+    """Anchor yield-level spread, then walk back using HYG vs IEF relative moves."""
+    if hyg_series is None or ief_series is None or tnx_series is None:
+        return None
+
+    ten_y = float(tnx_series.iloc[-1])
+    if hyg_yield is None:
+        hyg_price = float(hyg_series.iloc[-1])
+        hyg_yield = (4.75 / hyg_price) * 100 if hyg_price else None
+    if hyg_yield is None:
+        return None
+
+    aligned = pd.concat(
+        [hyg_series.rename("hyg"), ief_series.rename("ief")], axis=1
+    ).dropna()
+    if aligned.empty:
+        return None
+
+    spreads = [float((hyg_yield - ten_y) * 100)]
+    for i in range(len(aligned) - 2, -1, -1):
+        hyg_ret = aligned["hyg"].iloc[i + 1] / aligned["hyg"].iloc[i] - 1
+        ief_ret = aligned["ief"].iloc[i + 1] / aligned["ief"].iloc[i] - 1
+        spreads.insert(0, spreads[0] + (hyg_ret - ief_ret) * 10000)
+
+    return pd.Series(spreads, index=aligned.index)
+
+
+def get_rates_credit(prices_map, hyg_yield, hist_df):
+    """Real-time spreads + rolling credit velocity (no FRED lag)."""
+    ten_y = prices_map.get("^TNX")
+    two_y = prices_map.get("2YY=F")
+    three_m = prices_map.get("^IRX")
+    sofr_fut = prices_map.get("SR3=F")
+
+    hyg_series = _series_for_symbol(hist_df, "HYG")
+    ief_series = _series_for_symbol(hist_df, "IEF")
+    tnx_series = _price_series(hist_df, "^TNX", use_adj=False)
+    vix_series = _price_series(hist_df, "^VIX", use_adj=False)
+
+    if hyg_yield is None and hyg_series is not None:
+        hyg_yield = (4.75 / float(hyg_series.iloc[-1])) * 100
+
+    yield_spread_10y2y = (ten_y - two_y) * 100 if ten_y and two_y else None
+    yield_spread_10y3m = (ten_y - three_m) * 100 if ten_y and three_m else None
+    yield_spread_bps = (
+        yield_spread_10y2y if yield_spread_10y2y is not None else yield_spread_10y3m
+    )
+
+    sofr_implied = 100 - sofr_fut if sofr_fut else None
+    sofr_spread = (sofr_implied - three_m) * 100 if sofr_implied and three_m else None
+    hy_spread_level = (hyg_yield - ten_y) * 100 if hyg_yield and ten_y else None
+
+    hyg_rel_1d = _relative_return_bps(hyg_series, 1)
+    ief_rel_1d = _relative_return_bps(ief_series, 1)
+    hyg_vs_ief_1d = (
+        (hyg_rel_1d - ief_rel_1d)
+        if hyg_rel_1d is not None and ief_rel_1d is not None
+        else None
+    )
+
+    spread_series = _build_credit_spread_series(
+        hyg_series, ief_series, tnx_series, hyg_yield
+    )
+    spread_ma = spread_velocity = credit_spread_live = None
+    credit_signal = False
+    if spread_series is not None:
+        ma = spread_series.rolling(ROLLING_WINDOW, min_periods=1).mean()
+        credit_spread_live = float(spread_series.iloc[-1])
+        spread_ma = float(ma.iloc[-1])
+        spread_velocity = credit_spread_live - spread_ma
+        credit_signal = (
+            credit_spread_live > CREDIT_SPREAD_SIGNAL_BPS
+            and spread_velocity > CREDIT_VELOCITY_SIGNAL_BPS
+        )
+
+    vix_level = prices_map.get("^VIX")
+    vix_1d_chg = _relative_return_bps(vix_series, 1)
+
+    return {
+        "ten_y_pct": ten_y,
+        "two_y_pct": two_y,
+        "three_m_pct": three_m,
+        "yield_curve_spread_bps": yield_spread_bps,
+        "yield_curve_10y3m_bps": yield_spread_10y3m,
+        "sofr_implied_pct": sofr_implied,
+        "irs_swap_spread_bps": sofr_spread,
+        "hy_yield_pct": hyg_yield,
+        "credit_spread_bps": hy_spread_level,
+        "credit_spread_live_bps": credit_spread_live,
+        "credit_spread_ma_bps": spread_ma,
+        "spread_velocity_bps": spread_velocity,
+        "hyg_vs_ief_1d_bps": hyg_vs_ief_1d,
+        "credit_signal": credit_signal,
+        "execution_signal": credit_signal,
+        "vix_level": vix_level,
+        "vix_1d_chg_bps": vix_1d_chg,
+    }
+
+
+def _format_pe_suffix(sym, pe_map) -> str:
+    if sym not in PE_TICKERS:
         return ""
-    pe = data["trailing_pe"]
+    pe = pe_map.get(sym)
     if pe is None:
         return "  P/E: n/a"
     if pe < 0:
@@ -81,40 +245,124 @@ def _format_pe_suffix(data: dict) -> str:
     return f"  P/E: {pe:.2f}"
 
 
-def print_prices():
-    """Print timestamp and configured ticker prices once."""
-    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    for data in get_cspx_price():
-        suffix = _format_pe_suffix(data)
-        if data["price"] is not None:
-            print(f"{data['name']}: {data['price']:.2f} {data['currency']}{suffix}")
+def _notify_telegram(message: str) -> bool:
+    """Send alert if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars are set."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        resp = requests.post(
+            url, json={"chat_id": chat_id, "text": message}, timeout=10
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException:
+        return False
+
+
+def _print_execution_alert(data: dict, enable_telegram: bool = False) -> None:
+    """Print banner and optionally push Telegram when credit signal fires."""
+    if not data.get("execution_signal"):
+        return
+
+    spread = data.get("credit_spread_live_bps")
+    velocity = data.get("spread_velocity_bps")
+    print(f"\n{SIGNAL_BANNER}")
+    print(EXECUTION_ALERT_MSG)
+    if spread is not None and velocity is not None:
+        print(
+            f"當前即時利差: {spread:.0f} bps | 飆升速度: {velocity:+.0f} bps"
+        )
+    print(f"{SIGNAL_BANNER}\n")
+
+    if enable_telegram and spread is not None and velocity is not None:
+        msg = (
+            f"{EXECUTION_ALERT_MSG}\n"
+            f"實時利差: {spread:.0f} bps\n"
+            f"飆升速度: {velocity:+.0f} bps"
+        )
+        if _notify_telegram(msg):
+            print("Telegram alert sent.")
         else:
-            print(f"{data['name']}: no price{suffix}")
+            print("Telegram skipped (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).")
+
+
+def print_prices(telegram: bool = False):
+    """Download data, print equities/P/E, macro metrics, and check signals."""
+    print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    prices_map, pe_map, hyg_yield, hist_df = fetch_all_market_data()
+
+    print("--- Equities & Tickers ---")
+    for sym in ALL_STOCKS:
+        price = prices_map.get(sym)
+        suffix = _format_pe_suffix(sym, pe_map)
+        if price is not None:
+            print(f"{sym}: {price:.2f} USD{suffix}")
+        else:
+            print(f"{sym}: Price Unavailable{suffix}")
+
+    data = get_rates_credit(prices_map, hyg_yield, hist_df)
+    print("\n--- Rates & Credit (Yahoo live, no FRED lag) ---")
+
+    def _f_bps(v, signed=True):
+        if v is None:
+            return "n/a"
+        return f"{v:+.0f} bps" if signed else f"{v:.0f} bps"
+
+    def _f_pct(v):
+        return f"{v:.2f}%" if v is not None else "n/a"
+
+    curve_label = "10Y-2Y" if data["two_y_pct"] is not None else "10Y-3M"
+    print(
+        f"Yield curve ({curve_label}): {_f_bps(data['yield_curve_spread_bps'])}  "
+        f"(10Y {_f_pct(data['ten_y_pct'])} | 2Y {_f_pct(data['two_y_pct'])} | 3M {_f_pct(data['three_m_pct'])})"
+    )
+    print(
+        f"IRS swap (3M SOFR implied): {_f_pct(data['sofr_implied_pct'])}  "
+        f"spread vs 3M bill: {_f_bps(data['irs_swap_spread_bps'])}"
+    )
+    print(
+        f"Credit level (HYG yield vs 10Y): {_f_bps(data['credit_spread_bps'], signed=False)}  "
+        f"(HYG {_f_pct(data['hy_yield_pct'])} vs 10Y {_f_pct(data['ten_y_pct'])})"
+    )
+    print(
+        f"Credit live (HYG vs IEF): {_f_bps(data['credit_spread_live_bps'], signed=False)} | "
+        f"{ROLLING_WINDOW}D MA: {_f_bps(data['credit_spread_ma_bps'], signed=False)} | "
+        f"velocity: {_f_bps(data['spread_velocity_bps'])} | "
+        f"1D HYG-IEF: {_f_bps(data['hyg_vs_ief_1d_bps'])}"
+    )
+    vix_text = f"{data['vix_level']:.2f}" if data["vix_level"] is not None else "n/a"
+    print(
+        f"VIX thermometer: {vix_text} | "
+        f"1D change: {_f_bps(data['vix_1d_chg_bps'])}"
+    )
+
+    _print_execution_alert(data, enable_telegram=telegram)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Track selected tickers with yfinance."
+    parser = argparse.ArgumentParser(description="Track selected tickers efficiently.")
+    parser.add_argument(
+        "--live", nargs="?", const=15, type=int, help="Auto-refresh loop."
     )
     parser.add_argument(
-        "--live",
-        nargs="?",
-        const=15,
-        type=int,
-        metavar="SECONDS",
-        help="Auto-refresh continuously every N seconds (default: 15).",
+        "--telegram",
+        action="store_true",
+        help="Push execution alert to Telegram (needs TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).",
     )
     args = parser.parse_args()
 
     try:
         if args.live is None:
-            print_prices()
+            print_prices(telegram=args.telegram)
         else:
             if args.live <= 0:
                 raise ValueError("--live interval must be greater than 0 seconds.")
             while True:
-                print_prices()
-                print("-" * 40)
+                print_prices(telegram=args.telegram)
+                print("-" * 50)
                 time.sleep(args.live)
     except KeyboardInterrupt:
         print("\nStopped live tracking.")
