@@ -24,15 +24,12 @@ PE_TICKERS = {
     "VRT",
     "ALAB",
     "SEI",
-    "NASA",
-    "MCD",
-    "SCHG",
     "BTC-USD",
     "USO",
     "^VIX",
     "NOK",
     "IBM",
-    "IREN",
+    "SPYL.L",
 }
 MACRO_TICKERS = ["^TNX", "2YY=F", "^IRX", "SR3=F", "HYG", "IEF"]
 ALL_STOCKS = [
@@ -45,15 +42,12 @@ ALL_STOCKS = [
     "VRT",
     "ALAB",
     "SEI",
-    "NASA",
-    "MCD",
-    "SCHG",
     "BTC-USD",
     "USO",
     "^VIX",
     "NOK",
     "IBM",
-    "IREN",
+    "SPYL.L",
 ]
 HISTORY_PERIOD = "1mo"
 ROLLING_WINDOW = 5
@@ -272,9 +266,7 @@ def _print_execution_alert(data: dict, enable_telegram: bool = False) -> None:
     print(f"\n{SIGNAL_BANNER}")
     print(EXECUTION_ALERT_MSG)
     if spread is not None and velocity is not None:
-        print(
-            f"當前即時利差: {spread:.0f} bps | 飆升速度: {velocity:+.0f} bps"
-        )
+        print(f"當前即時利差: {spread:.0f} bps | 飆升速度: {velocity:+.0f} bps")
     print(f"{SIGNAL_BANNER}\n")
 
     if enable_telegram and spread is not None and velocity is not None:
@@ -335,8 +327,7 @@ def print_prices(telegram: bool = False):
     )
     vix_text = f"{data['vix_level']:.2f}" if data["vix_level"] is not None else "n/a"
     print(
-        f"VIX thermometer: {vix_text} | "
-        f"1D change: {_f_bps(data['vix_1d_chg_bps'])}"
+        f"VIX thermometer: {vix_text} | " f"1D change: {_f_bps(data['vix_1d_chg_bps'])}"
     )
 
     _print_execution_alert(data, enable_telegram=telegram)
