@@ -7,12 +7,19 @@ US session — critical when HK-evening selloffs move HYG/IEF before FRED update
 import argparse
 import math
 import os
+import sys
 import time
 from datetime import datetime
 
 import pandas as pd
 import requests
 import yfinance as yf
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 PE_TICKERS = {
     "TSM",
@@ -50,6 +57,8 @@ ALL_STOCKS = [
     "SPYL.L",
 ]
 HISTORY_PERIOD = "1mo"
+SMH_HISTORY_PERIOD = "6mo"
+MA_WINDOW = 50
 ROLLING_WINDOW = 5
 CREDIT_SPREAD_SIGNAL_BPS = 220
 CREDIT_VELOCITY_SIGNAL_BPS = 20
@@ -58,6 +67,10 @@ EXECUTION_ALERT_MSG = (
     "【核彈級買點】指標已達標，立刻登入 IBKR 賣出 SGOV，分批滿倉 SMH！"
 )
 ADJ_CLOSE_SYMBOLS = frozenset({"HYG", "IEF", "SGOV"})
+SMH_DMA_TICKERS = ("SMH", "^SOX")
+SMH_GUIDANCE_TICKERS = ("NVDA", "TSM", "AVGO", "MU", "AMD", "QCOM")
+SMH_MEMORY_TICKERS = ("MU", "000660.KS")
+SMH_INVENTORY_TICKERS = ("NVDA", "TSM", "MU", "AVGO", "AMD")
 
 
 def _parse_trailing_pe(raw):
@@ -239,6 +252,201 @@ def _format_pe_suffix(sym, pe_map) -> str:
     return f"  P/E: {pe:.2f}"
 
 
+def _ma50_status(series):
+    """Return price vs 50-day MA; None if insufficient history."""
+    if series is None or len(series) < MA_WINDOW:
+        return None
+    price = float(series.iloc[-1])
+    ma50 = float(series.rolling(MA_WINDOW).mean().iloc[-1])
+    pct_from_ma = (price / ma50 - 1) * 100
+    return {
+        "price": price,
+        "ma50": ma50,
+        "below_ma50": price < ma50,
+        "pct_from_ma": pct_from_ma,
+    }
+
+
+def _guidance_flags(ticker_obj):
+    """Proxy for FY guidance cuts: recent miss or negative FY estimate growth."""
+    flags = []
+    try:
+        hist = ticker_obj.earnings_history
+        if hist is not None and not hist.empty:
+            surprise = hist.iloc[-1].get("surprisePercent")
+            if surprise is not None and float(surprise) < 0:
+                flags.append("recent EPS miss")
+    except Exception:
+        pass
+    try:
+        est = ticker_obj.earnings_estimate
+        if est is not None and not est.empty and "0y" in est.index:
+            growth = est.loc["0y", "growth"]
+            if growth is not None and float(growth) < 0:
+                flags.append("FY est. growth negative")
+    except Exception:
+        pass
+    return flags
+
+
+def _inventory_status(ticker_obj):
+    """Latest QoQ inventory change; flag consecutive rises."""
+    try:
+        bs = ticker_obj.quarterly_balance_sheet
+        if bs is None or bs.empty or "Inventory" not in bs.index:
+            return None
+        inv = bs.loc["Inventory"].dropna().sort_index(ascending=False)
+        if len(inv) < 2:
+            return None
+        latest = float(inv.iloc[0])
+        prior = float(inv.iloc[1])
+        qoq_pct = (latest / prior - 1) * 100 if prior else None
+        consecutive_rise = False
+        if len(inv) >= 3 and float(inv.iloc[2]):
+            prior_q = (float(inv.iloc[1]) / float(inv.iloc[2]) - 1) * 100
+            consecutive_rise = qoq_pct is not None and qoq_pct > 0 and prior_q > 0
+        return {
+            "qoq_pct": qoq_pct,
+            "rising": qoq_pct is not None and qoq_pct > 0,
+            "consecutive_rise": consecutive_rise,
+        }
+    except Exception:
+        return None
+
+
+def get_smh_health():
+    """SMH/SOX trend, guidance proxy, memory momentum, inventory build."""
+    symbols = list(
+        dict.fromkeys(
+            list(SMH_DMA_TICKERS)
+            + list(SMH_MEMORY_TICKERS)
+            + list(SMH_GUIDANCE_TICKERS)
+            + list(SMH_INVENTORY_TICKERS)
+        )
+    )
+    hist_df = yf.download(
+        symbols, period=SMH_HISTORY_PERIOD, group_by="ticker", progress=False
+    )
+    tickers_batch = yf.Tickers(symbols)
+
+    dma = {}
+    for sym in SMH_DMA_TICKERS:
+        series = _price_series(hist_df, sym, use_adj=False)
+        dma[sym] = _ma50_status(series)
+
+    smh_series = _price_series(hist_df, "SMH", use_adj=False)
+    memory = {}
+    smh_20d = _relative_return_bps(smh_series, 20)
+    for sym in SMH_MEMORY_TICKERS:
+        mem_series = _price_series(hist_df, sym, use_adj=False)
+        mem_20d = _relative_return_bps(mem_series, 20)
+        rel_vs_smh = (
+            mem_20d - smh_20d if mem_20d is not None and smh_20d is not None else None
+        )
+        memory[sym] = {
+            "return_20d_bps": mem_20d,
+            "rel_vs_smh_20d_bps": rel_vs_smh,
+            "weakening": mem_20d is not None
+            and mem_20d < 0
+            and (rel_vs_smh or 0) < -150,
+        }
+
+    guidance = {}
+    for sym in SMH_GUIDANCE_TICKERS:
+        flags = _guidance_flags(tickers_batch.tickers[sym])
+        guidance[sym] = {"flags": flags, "cut_risk": bool(flags)}
+
+    inventory = {}
+    for sym in SMH_INVENTORY_TICKERS:
+        inventory[sym] = _inventory_status(tickers_batch.tickers[sym])
+
+    bearish = 0
+    if (dma.get("SMH") or {}).get("below_ma50"):
+        bearish += 1
+    if (dma.get("^SOX") or {}).get("below_ma50"):
+        bearish += 1
+    if any(m.get("weakening") for m in memory.values()):
+        bearish += 1
+    if sum(1 for g in guidance.values() if g.get("cut_risk")) >= 2:
+        bearish += 1
+    if (
+        sum(
+            1
+            for inv in inventory.values()
+            if inv and (inv.get("consecutive_rise") or (inv.get("qoq_pct") or 0) > 10)
+        )
+        >= 2
+    ):
+        bearish += 1
+
+    return {
+        "dma": dma,
+        "memory": memory,
+        "guidance": guidance,
+        "inventory": inventory,
+        "bearish_count": bearish,
+        "bearish_max": 5,
+    }
+
+
+def _print_smh_health(data):
+    print("\n--- SMH / Semiconductor Health ---")
+
+    for sym in SMH_DMA_TICKERS:
+        row = data["dma"].get(sym)
+        if not row:
+            print(f"{sym}: 50D MA unavailable (need {MA_WINDOW}+ sessions)")
+            continue
+        status = "BELOW 50D MA" if row["below_ma50"] else "above 50D MA"
+        print(
+            f"{sym}: {row['price']:.2f} | 50D MA {row['ma50']:.2f} | "
+            f"{status} ({row['pct_from_ma']:+.1f}%)"
+        )
+
+    mem_parts = []
+    for sym, row in data["memory"].items():
+        if row.get("return_20d_bps") is None:
+            mem_parts.append(f"{sym} n/a")
+            continue
+        tag = " weakening" if row.get("weakening") else ""
+        mem_parts.append(f"{sym} {row['return_20d_bps']:+.0f} bps vs SMH{tag}")
+    mem_label = (
+        "記憶體轉弱"
+        if any(m.get("weakening") for m in data["memory"].values())
+        else "記憶體尚可"
+    )
+    print(f"Memory 20D ({mem_label}): {' | '.join(mem_parts)}")
+
+    guide_parts = []
+    cuts = 0
+    for sym, row in data["guidance"].items():
+        if row.get("cut_risk"):
+            cuts += 1
+            guide_parts.append(f"{sym}: {', '.join(row['flags'])}")
+        else:
+            guide_parts.append(f"{sym}: ok")
+    guide_label = "指引下修風險" if cuts >= 2 else "指引大致穩定"
+    print(f"Guidance proxy ({guide_label}, {cuts} flagged): {' | '.join(guide_parts)}")
+
+    inv_parts = []
+    rising = 0
+    for sym, row in data["inventory"].items():
+        if not row or row.get("qoq_pct") is None:
+            inv_parts.append(f"{sym} n/a")
+            continue
+        if row.get("rising"):
+            rising += 1
+        streak = " 2Q↑" if row.get("consecutive_rise") else ""
+        inv_parts.append(f"{sym} {row['qoq_pct']:+.1f}% QoQ{streak}")
+    inv_label = "庫存攀升" if rising >= 3 else "庫存可控"
+    print(f"Inventory ({inv_label}): {' | '.join(inv_parts)}")
+
+    print(
+        f"SMH risk summary: {data['bearish_count']}/{data['bearish_max']} bearish checks "
+        f"(50D MA, memory, guidance, inventory)"
+    )
+
+
 def _notify_telegram(message: str) -> bool:
     """Send alert if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars are set."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -331,6 +539,9 @@ def print_prices(telegram: bool = False):
     )
 
     _print_execution_alert(data, enable_telegram=telegram)
+
+    smh_data = get_smh_health()
+    _print_smh_health(smh_data)
 
 
 if __name__ == "__main__":
