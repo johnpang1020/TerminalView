@@ -71,6 +71,21 @@ SMH_DMA_TICKERS = ("SMH", "^SOX")
 SMH_GUIDANCE_TICKERS = ("NVDA", "TSM", "AVGO", "MU", "AMD", "QCOM")
 SMH_MEMORY_TICKERS = ("MU", "000660.KS")
 SMH_INVENTORY_TICKERS = ("NVDA", "TSM", "MU", "AVGO", "AMD")
+# VanEck SMH approximate index weights for guidance veto (not equal-vote).
+SMH_GUIDANCE_WEIGHTS = {
+    "NVDA": 0.20,
+    "TSM": 0.11,
+    "AVGO": 0.08,
+    "MU": 0.05,
+    "AMD": 0.05,
+    "QCOM": 0.05,
+}
+GUIDANCE_WEIGHT_VETO = 0.15
+GUIDANCE_COUNT_VETO = 3
+MEMORY_SCISSORS_BPS = -500
+INVENTORY_REV_YOY_STOCKPILE_PCT = 30.0
+INVENTORY_REV_YOY_STAGNATION_PCT = 10.0
+INVENTORY_CYCLE_BEARISH_MIN = 2
 
 
 def _parse_trailing_pe(raw):
@@ -289,8 +304,22 @@ def _guidance_flags(ticker_obj):
     return flags
 
 
+def _latest_quarter_revenue_yoy(ticker_obj):
+    """Latest quarter revenue vs same quarter one year ago (%)."""
+    try:
+        fin = ticker_obj.quarterly_financials
+        if fin is None or fin.empty or "Total Revenue" not in fin.index:
+            return None
+        rev = fin.loc["Total Revenue"].dropna().sort_index(ascending=False)
+        if len(rev) < 5 or not float(rev.iloc[4]):
+            return None
+        return (float(rev.iloc[0]) / float(rev.iloc[4]) - 1) * 100
+    except Exception:
+        return None
+
+
 def _inventory_status(ticker_obj):
-    """Latest QoQ inventory change; flag consecutive rises."""
+    """QoQ inventory with revenue-YoY valve (stockpile vs cycle stagnation)."""
     try:
         bs = ticker_obj.quarterly_balance_sheet
         if bs is None or bs.empty or "Inventory" not in bs.index:
@@ -305,13 +334,72 @@ def _inventory_status(ticker_obj):
         if len(inv) >= 3 and float(inv.iloc[2]):
             prior_q = (float(inv.iloc[1]) / float(inv.iloc[2]) - 1) * 100
             consecutive_rise = qoq_pct is not None and qoq_pct > 0 and prior_q > 0
+
+        rev_yoy = _latest_quarter_revenue_yoy(ticker_obj)
+        rising = qoq_pct is not None and qoq_pct > 0
+        if rising and rev_yoy is not None and rev_yoy > INVENTORY_REV_YOY_STOCKPILE_PCT:
+            status = "stockpile"
+            cycle_bearish = False
+        elif (
+            rising
+            and rev_yoy is not None
+            and rev_yoy < INVENTORY_REV_YOY_STAGNATION_PCT
+        ):
+            status = "cycle_stagnation"
+            cycle_bearish = True
+        elif rising:
+            status = "rising_neutral"
+            cycle_bearish = False
+        else:
+            status = "stable"
+            cycle_bearish = False
+
         return {
             "qoq_pct": qoq_pct,
-            "rising": qoq_pct is not None and qoq_pct > 0,
+            "rising": rising,
             "consecutive_rise": consecutive_rise,
+            "rev_yoy_pct": rev_yoy,
+            "status": status,
+            "cycle_bearish": cycle_bearish,
         }
     except Exception:
         return None
+
+
+def _evaluate_guidance_sector(guidance):
+    """Weight veto: weak only if flagged weight >= 15% or >= 3 names flagged."""
+    flagged = [sym for sym, row in guidance.items() if row.get("cut_risk")]
+    flagged_weight = sum(SMH_GUIDANCE_WEIGHTS.get(sym, 0.05) for sym in flagged)
+    sector_weak = (
+        flagged_weight >= GUIDANCE_WEIGHT_VETO or len(flagged) >= GUIDANCE_COUNT_VETO
+    )
+    return {
+        "sector_weak": sector_weak,
+        "flagged_count": len(flagged),
+        "flagged_weight_pct": flagged_weight * 100,
+        "flagged_symbols": flagged,
+    }
+
+
+def _evaluate_memory_scissors(memory):
+    """Bearish only when BOTH MU and SK Hynix lag SMH by > 500 bps."""
+    mu_rel = (memory.get("MU") or {}).get("rel_vs_smh_20d_bps")
+    hynix_rel = (memory.get("000660.KS") or {}).get("rel_vs_smh_20d_bps")
+    if mu_rel is None or hynix_rel is None:
+        return {
+            "status": "unknown",
+            "bearish": False,
+            "mu_rel": mu_rel,
+            "hynix_rel": hynix_rel,
+        }
+    bearish = mu_rel < MEMORY_SCISSORS_BPS and hynix_rel < MEMORY_SCISSORS_BPS
+    status = "bearish" if bearish else "safe"
+    return {
+        "status": status,
+        "bearish": bearish,
+        "mu_rel": mu_rel,
+        "hynix_rel": hynix_rel,
+    }
 
 
 def get_smh_health():
@@ -346,44 +434,49 @@ def get_smh_health():
         memory[sym] = {
             "return_20d_bps": mem_20d,
             "rel_vs_smh_20d_bps": rel_vs_smh,
-            "weakening": mem_20d is not None
-            and mem_20d < 0
-            and (rel_vs_smh or 0) < -150,
         }
+    memory_scissors = _evaluate_memory_scissors(memory)
 
     guidance = {}
     for sym in SMH_GUIDANCE_TICKERS:
         flags = _guidance_flags(tickers_batch.tickers[sym])
-        guidance[sym] = {"flags": flags, "cut_risk": bool(flags)}
+        guidance[sym] = {
+            "flags": flags,
+            "cut_risk": bool(flags),
+            "weight_pct": SMH_GUIDANCE_WEIGHTS.get(sym, 0.05) * 100,
+        }
+    guidance_sector = _evaluate_guidance_sector(guidance)
 
     inventory = {}
     for sym in SMH_INVENTORY_TICKERS:
         inventory[sym] = _inventory_status(tickers_batch.tickers[sym])
+
+    cycle_stagnation_count = sum(
+        1 for inv in inventory.values() if inv and inv.get("cycle_bearish")
+    )
+    inventory_bearish = cycle_stagnation_count >= INVENTORY_CYCLE_BEARISH_MIN
 
     bearish = 0
     if (dma.get("SMH") or {}).get("below_ma50"):
         bearish += 1
     if (dma.get("^SOX") or {}).get("below_ma50"):
         bearish += 1
-    if any(m.get("weakening") for m in memory.values()):
+    if memory_scissors.get("bearish"):
         bearish += 1
-    if sum(1 for g in guidance.values() if g.get("cut_risk")) >= 2:
+    if guidance_sector.get("sector_weak"):
         bearish += 1
-    if (
-        sum(
-            1
-            for inv in inventory.values()
-            if inv and (inv.get("consecutive_rise") or (inv.get("qoq_pct") or 0) > 10)
-        )
-        >= 2
-    ):
+    if inventory_bearish:
         bearish += 1
 
     return {
         "dma": dma,
         "memory": memory,
+        "memory_scissors": memory_scissors,
         "guidance": guidance,
+        "guidance_sector": guidance_sector,
         "inventory": inventory,
+        "inventory_bearish": inventory_bearish,
+        "cycle_stagnation_count": cycle_stagnation_count,
         "bearish_count": bearish,
         "bearish_max": 5,
     }
@@ -405,40 +498,66 @@ def _print_smh_health(data):
 
     mem_parts = []
     for sym, row in data["memory"].items():
-        if row.get("return_20d_bps") is None:
+        rel = row.get("rel_vs_smh_20d_bps")
+        if rel is None:
             mem_parts.append(f"{sym} n/a")
-            continue
-        tag = " weakening" if row.get("weakening") else ""
-        mem_parts.append(f"{sym} {row['return_20d_bps']:+.0f} bps vs SMH{tag}")
-    mem_label = (
-        "記憶體轉弱"
-        if any(m.get("weakening") for m in data["memory"].values())
-        else "記憶體尚可"
-    )
+        else:
+            mem_parts.append(f"{sym} {rel:+.0f} bps vs SMH")
+    scissors = data.get("memory_scissors") or {}
+    mem_status = scissors.get("status", "unknown")
+    if mem_status == "bearish":
+        mem_label = "記憶體確立轉弱"
+    elif mem_status == "safe":
+        mem_label = "記憶體結構健康（台美剪刀差）"
+    else:
+        mem_label = "記憶體資料不足"
     print(f"Memory 20D ({mem_label}): {' | '.join(mem_parts)}")
 
     guide_parts = []
-    cuts = 0
     for sym, row in data["guidance"].items():
+        wt = row.get("weight_pct", 0)
         if row.get("cut_risk"):
-            cuts += 1
-            guide_parts.append(f"{sym}: {', '.join(row['flags'])}")
+            guide_parts.append(f"{sym}({wt:.0f}%w): {', '.join(row['flags'])}")
         else:
-            guide_parts.append(f"{sym}: ok")
-    guide_label = "指引下修風險" if cuts >= 2 else "指引大致穩定"
-    print(f"Guidance proxy ({guide_label}, {cuts} flagged): {' | '.join(guide_parts)}")
+            guide_parts.append(f"{sym}({wt:.0f}%w): ok")
+    sector = data.get("guidance_sector") or {}
+    flagged_n = sector.get("flagged_count", 0)
+    flagged_w = sector.get("flagged_weight_pct", 0)
+    if sector.get("sector_weak"):
+        guide_label = (
+            f"板塊指引轉弱（flagged {flagged_n} 家 / {flagged_w:.0f}% SMH 權重）"
+        )
+    else:
+        guide_label = f"板塊指引穩定（{flagged_n} 家 flagged / {flagged_w:.0f}% 權重，未達 15% 或 3 家門檻）"
+    print(f"Guidance proxy ({guide_label}): {' | '.join(guide_parts)}")
 
     inv_parts = []
-    rising = 0
+    stockpile = cycle = 0
+    status_labels = {
+        "stockpile": "戰備囤貨",
+        "cycle_stagnation": "週期滯銷",
+        "rising_neutral": "庫存升/營收中性",
+        "stable": "穩定",
+    }
     for sym, row in data["inventory"].items():
         if not row or row.get("qoq_pct") is None:
             inv_parts.append(f"{sym} n/a")
             continue
-        if row.get("rising"):
-            rising += 1
+        label = status_labels.get(row.get("status"), row.get("status"))
+        rev = row.get("rev_yoy_pct")
+        rev_txt = f" rev YoY {rev:+.0f}%" if rev is not None else ""
         streak = " 2Q↑" if row.get("consecutive_rise") else ""
-        inv_parts.append(f"{sym} {row['qoq_pct']:+.1f}% QoQ{streak}")
-    inv_label = "庫存攀升" if rising >= 3 else "庫存可控"
+        inv_parts.append(f"{sym} {row['qoq_pct']:+.1f}% QoQ{rev_txt} [{label}]{streak}")
+        if row.get("status") == "stockpile":
+            stockpile += 1
+        elif row.get("cycle_bearish"):
+            cycle += 1
+    if data.get("inventory_bearish"):
+        inv_label = f"週期性滯銷 ({cycle} 家)"
+    elif stockpile >= 2:
+        inv_label = f"AI 戰備囤貨為主 ({stockpile} 家)"
+    else:
+        inv_label = "庫存可控"
     print(f"Inventory ({inv_label}): {' | '.join(inv_parts)}")
 
     print(
