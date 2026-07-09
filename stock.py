@@ -1276,8 +1276,12 @@ def _print_hard_data(payload):
     )
 
 
-def print_prices(telegram: bool = False, export_json=None, entry_price=None):
-    """Download data, print equities/P/E, macro metrics, and check signals."""
+def print_prices(telegram: bool = False, export_json=None, entry_price=None, hard_data=False):
+    """Print equities, US rates/credit, SMH health, market structure.
+
+    Default: dashboard only — does NOT write smh_pe_history.csv or JSON.
+    Pass hard_data=True and/or export_json to run hard-data modules.
+    """
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     prices_map, pe_map, hyg_yield, hist_df = fetch_all_market_data()
 
@@ -1336,16 +1340,18 @@ def print_prices(telegram: bool = False, export_json=None, entry_price=None):
     structure_data = get_market_structure()
     _print_market_structure(structure_data)
 
-    hard = build_hard_data_export(entry_price=entry_price)
-    _print_hard_data(hard)
-    if export_json is not None:
-        out_path = Path(export_json) if export_json else DEFAULT_JSON_EXPORT
-        if export_json is True or export_json == "":
-            out_path = DEFAULT_JSON_EXPORT
-        out_path.write_text(
-            json.dumps(hard, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print(f"\nHard data JSON written: {out_path}")
+    # Optional: PE history + JSON hard-data modules (off by default).
+    if hard_data or export_json is not None:
+        hard = build_hard_data_export(entry_price=entry_price)
+        _print_hard_data(hard)
+        if export_json is not None:
+            out_path = Path(export_json) if export_json else DEFAULT_JSON_EXPORT
+            if export_json is True or export_json == "":
+                out_path = DEFAULT_JSON_EXPORT
+            out_path.write_text(
+                json.dumps(hard, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            print(f"\nHard data JSON written: {out_path}")
 
 
 if __name__ == "__main__":
@@ -1359,12 +1365,17 @@ if __name__ == "__main__":
         help="Push execution alert to Telegram (needs TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).",
     )
     parser.add_argument(
+        "--hard-data",
+        action="store_true",
+        help="Also run hard-data modules (writes smh_pe_history.csv; prints gates).",
+    )
+    parser.add_argument(
         "--export-json",
         nargs="?",
         const=str(DEFAULT_JSON_EXPORT),
         default=None,
         metavar="PATH",
-        help="Export hard-data modules JSON (default: hard_data_export.json).",
+        help="Export hard-data JSON (implies --hard-data; default: hard_data_export.json).",
     )
     parser.add_argument(
         "--entry-price",
@@ -1392,6 +1403,7 @@ if __name__ == "__main__":
                 telegram=args.telegram,
                 export_json=args.export_json,
                 entry_price=args.entry_price,
+                hard_data=args.hard_data,
             )
         else:
             if args.live <= 0:
@@ -1401,6 +1413,7 @@ if __name__ == "__main__":
                     telegram=args.telegram,
                     export_json=args.export_json,
                     entry_price=args.entry_price,
+                    hard_data=args.hard_data,
                 )
                 print("-" * 50)
                 time.sleep(args.live)
