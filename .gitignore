@@ -3,3 +3,6 @@
 ./export_portfolio_view.py
 ./portfolio-view.html
 ./refresh_portfolio.py
+.passive_share_cache.json
+hard_data_export.json
+smh_pe_history.csv
