@@ -68,9 +68,9 @@ CREDIT_SPREAD_SIGNAL_BPS = 220
 CREDIT_VELOCITY_SIGNAL_BPS = 20
 SIGNAL_BANNER = "!" * 60
 EXECUTION_ALERT_MSG = (
-    "【核彈級買點】指標已達標，立刻登入 IBKR 賣出 SGOV，分批滿倉 SMH！"
+    "【核彈級買點】指標已達標，立刻登入 IBKR 賣出 IB01，分批滿倉 SMH！"
 )
-ADJ_CLOSE_SYMBOLS = frozenset({"HYG", "IEF", "SGOV"})
+ADJ_CLOSE_SYMBOLS = frozenset({"HYG", "IEF", "IB01.L", "IB01"})
 SMH_DMA_TICKERS = ("SMH", "^SOX")
 SMH_GUIDANCE_TICKERS = ("NVDA", "TSM", "AVGO", "MU", "AMD", "QCOM")
 SMH_MEMORY_TICKERS = ("MU", "000660.KS")
@@ -107,10 +107,24 @@ STRUCTURE_RATIO_TICKERS = ("SPY", "RSP")
 # Hard-data modules (no narrative): corporate actions, PE percentile, memory scissors.
 HARD_DATA_TICKER = "SMH"
 PE_HISTORY_PATH = Path(__file__).with_name("smh_pe_history.csv")
-PE_SAFE_CEILING = 25.0
+PE_SAFE_CEILING = 25.0  # observation log only — does NOT gate buys
 PE_SAFE_PERCENTILE = 50.0
 CORP_ACTIONS_LOOKBACK_DAYS = 400
 DEFAULT_JSON_EXPORT = Path(__file__).with_name("hard_data_export.json")
+PORTFOLIO_POSITIONS_PATH = Path(__file__).with_name("portfolio_positions.json")
+# Monthly confluence routing (HKD) — trend filter, not valuation lock.
+MONTHLY_CONTRIB_HKD = 8000.0
+BTC_ADD_HKD = 1000.0
+CORE_ALLOC_PCT = 0.70
+SATELLITE_ALLOC_PCT = 0.30
+MA_FILTER_WINDOW = 60
+MA_FILTER_TICKERS = ("SMH", "BTC-USD")
+# Rebalance: core/satellite band (market-value weights).
+CORE_TARGET_PCT = 0.70
+SATELLITE_TARGET_PCT = 0.30
+SATELLITE_TRIGGER_PCT = 0.40
+BTC_WEIGHT_CAP = 0.05
+FX_HKD_PER_USD = 7.8
 
 
 def _parse_trailing_pe(raw):
@@ -558,10 +572,10 @@ def calculate_pe_percentile(
     history_path=None,
 ):
     """
-    US SMH valuation lock inputs.
+    SMH trailing PE observation (log only).
 
-    Yahoo SMH has trailingPE, not forwardPE — field is labeled trailing_pe.
-    Percentile uses local accumulated history (smh_pe_history.csv), not a fantasy 5y API.
+    is_valuation_safe is computed for dashboards but does NOT gate buys.
+    Yahoo SMH usually has trailingPE only (forwardPE often null).
     """
     path = Path(history_path) if history_path else PE_HISTORY_PATH
     info = yf.Ticker(ticker_symbol).info
@@ -583,7 +597,6 @@ def calculate_pe_percentile(
     if live_pe is not None:
         below_ceiling = live_pe <= pe_ceiling
         below_median = percentile is not None and percentile <= PE_SAFE_PERCENTILE
-        # Rigid lock: must clear absolute ceiling; percentile used when history exists.
         is_valuation_safe = bool(
             below_ceiling and (percentile is None or below_median or history_count < 20)
         )
@@ -600,7 +613,11 @@ def calculate_pe_percentile(
         "history_path": str(path),
         "pe_ceiling": pe_ceiling,
         "is_valuation_safe": is_valuation_safe,
-        "note": "SMH Yahoo forwardPE usually null; percentile grows with local CSV history.",
+        "gates_buys": False,
+        "note": (
+            "OBSERVE ONLY — valuation_safe does not block SMH/BTC buys. "
+            "Use MA filter + rebalance for execution."
+        ),
     }
 
 
@@ -641,6 +658,295 @@ def calculate_memory_scissors(window=20):
         "source": "yfinance auto_adjust Close",
     }
 
+
+def get_ma_status(symbol: str, window: int = MA_FILTER_WINDOW, period: str = "1y"):
+    """Close vs N-day MA. Returns None fields if history insufficient."""
+    try:
+        hist = yf.Ticker(symbol).history(period=period, auto_adjust=True)
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            return {"symbol": symbol, "window": window, "ok": False, "reason": "no_data"}
+        close = hist["Close"].dropna()
+        if len(close) < window:
+            return {
+                "symbol": symbol,
+                "window": window,
+                "ok": False,
+                "reason": "insufficient_bars",
+                "bars": len(close),
+            }
+        price = float(close.iloc[-1])
+        ma = float(close.rolling(window).mean().iloc[-1])
+        return {
+            "symbol": symbol,
+            "window": window,
+            "ok": True,
+            "price": price,
+            "ma": ma,
+            "above_ma": price >= ma,
+            "pct_from_ma": (price / ma - 1.0) * 100.0,
+        }
+    except Exception as exc:
+        return {"symbol": symbol, "window": window, "ok": False, "reason": str(exc)}
+
+
+def route_monthly_contribution(
+    contrib_hkd: float = MONTHLY_CONTRIB_HKD,
+    btc_add_hkd: float = BTC_ADD_HKD,
+    ma_window: int = MA_FILTER_WINDOW,
+    portfolio_total_usd: float | None = None,
+    btc_mv_usd: float | None = None,
+):
+    """
+    Monthly confluence router (no valuation gate).
+
+    70% → SPYL.L always.
+    30% sleeve → SMH if SMH close >= 60MA, else SPYL.L.
+    Extra BTC add → BTC if under 5% cap (when portfolio totals provided), else SPYL.L.
+    """
+    smh_ma = get_ma_status("SMH", window=ma_window)
+    btc_ma = get_ma_status("BTC-USD", window=ma_window)
+
+    core_hkd = contrib_hkd * CORE_ALLOC_PCT
+    satellite_hkd = contrib_hkd * SATELLITE_ALLOC_PCT
+
+    smh_above = bool(smh_ma.get("ok") and smh_ma.get("above_ma"))
+    orders = [
+        {
+            "action": "BUY",
+            "symbol": "SPYL.L",
+            "amount_hkd": round(core_hkd, 3),
+            "reason": "core_70pct",
+        }
+    ]
+
+    if smh_above:
+        orders.append(
+            {
+                "action": "BUY",
+                "symbol": "SMH",
+                "amount_hkd": round(satellite_hkd, 3),
+                "reason": f"satellite_sleeve_above_{ma_window}MA",
+            }
+        )
+        satellite_route = "SMH"
+    else:
+        orders.append(
+            {
+                "action": "BUY",
+                "symbol": "SPYL.L",
+                "amount_hkd": round(satellite_hkd, 3),
+                "reason": f"satellite_sleeve_below_{ma_window}MA_or_unknown→SPYL",
+            }
+        )
+        satellite_route = "SPYL.L"
+
+    btc_allowed = True
+    btc_reason = f"fixed_add_{btc_add_hkd:.0f}_hkd"
+    if (
+        portfolio_total_usd is not None
+        and btc_mv_usd is not None
+        and portfolio_total_usd > 0
+    ):
+        projected = (btc_mv_usd + btc_add_hkd / FX_HKD_PER_USD) / (
+            portfolio_total_usd + btc_add_hkd / FX_HKD_PER_USD
+        )
+        if projected > BTC_WEIGHT_CAP:
+            btc_allowed = False
+            btc_reason = f"btc_cap_{BTC_WEIGHT_CAP:.0%}_overflow→SPYL"
+
+    if btc_allowed:
+        if btc_ma.get("ok") and not btc_ma.get("above_ma"):
+            orders.append(
+                {
+                    "action": "BUY",
+                    "symbol": "SPYL.L",
+                    "amount_hkd": round(btc_add_hkd, 3),
+                    "reason": f"btc_below_{ma_window}MA→SPYL",
+                }
+            )
+            btc_route = "SPYL.L"
+        else:
+            orders.append(
+                {
+                    "action": "BUY",
+                    "symbol": "BTC-USD",
+                    "amount_hkd": round(btc_add_hkd, 3),
+                    "reason": btc_reason,
+                }
+            )
+            btc_route = "BTC-USD"
+    else:
+        orders.append(
+            {
+                "action": "BUY",
+                "symbol": "SPYL.L",
+                "amount_hkd": round(btc_add_hkd, 3),
+                "reason": btc_reason,
+            }
+        )
+        btc_route = "SPYL.L"
+
+    return {
+        "asof": datetime.now().isoformat(timespec="seconds"),
+        "contrib_hkd": contrib_hkd,
+        "btc_add_hkd": btc_add_hkd,
+        "ma_window": ma_window,
+        "valuation_gates_buys": False,
+        "filters": {"SMH": smh_ma, "BTC-USD": btc_ma},
+        "routes": {
+            "core": "SPYL.L",
+            "satellite_30pct": satellite_route,
+            "btc_add": btc_route,
+        },
+        "orders": orders,
+    }
+
+
+def load_portfolio_positions(path=None):
+    """Load market-value positions JSON: {\"SPYL.L\": usd, \"SMH\": usd, ...}."""
+    pos_path = Path(path) if path else PORTFOLIO_POSITIONS_PATH
+    if not pos_path.exists():
+        return None
+    data = json.loads(pos_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("portfolio positions must be a JSON object of symbol→USD value")
+    cleaned = {}
+    for key, val in data.items():
+        if key.startswith("_"):
+            continue
+        cleaned[str(key)] = float(val)
+    return cleaned
+
+
+def plan_rebalance(
+    positions: dict,
+    satellite_trigger: float = SATELLITE_TRIGGER_PCT,
+    satellite_target: float = SATELLITE_TARGET_PCT,
+    core_target: float = CORE_TARGET_PCT,
+    btc_cap: float = BTC_WEIGHT_CAP,
+):
+    """
+    Check weights → compute sell SMH/BTC → buy SPYL instructions.
+
+    Triggers when (SMH + BTC) / total >= satellite_trigger (default 40%).
+    Trims satellite sleeve back to satellite_target (default 30%).
+    Also enforces BTC hard cap independently.
+    Does not place orders — returns an instruction list only.
+    """
+    if not positions:
+        return {
+            "triggered": False,
+            "reason": "no_positions",
+            "orders": [],
+        }
+
+    total = float(sum(max(0.0, v) for v in positions.values()))
+    if total <= 0:
+        return {"triggered": False, "reason": "zero_total", "orders": [], "total_usd": 0.0}
+
+    spyl = float(positions.get("SPYL.L", positions.get("SPYL", 0.0)) or 0.0)
+    smh = float(positions.get("SMH", 0.0) or 0.0)
+    btc = float(positions.get("BTC-USD", positions.get("BTC", 0.0)) or 0.0)
+    cash = float(positions.get("CASH", 0.0) or 0.0) + float(
+        positions.get("IB01.L", positions.get("IB01", positions.get("SGOV", 0.0))) or 0.0
+    )
+    other = total - spyl - smh - btc - cash
+
+    weights = {
+        "SPYL.L": spyl / total,
+        "SMH": smh / total,
+        "BTC-USD": btc / total,
+        "CASH+IB01": cash / total,
+        "OTHER": max(0.0, other) / total,
+        "satellite": (smh + btc) / total,
+        "core_proxy": spyl / total,
+    }
+
+    orders = []
+    sell_usd = 0.0
+    reasons = []
+
+    btc_excess = max(0.0, btc - btc_cap * total)
+    if btc_excess > 1.0:
+        orders.append(
+            {
+                "action": "SELL",
+                "symbol": "BTC-USD",
+                "amount_usd": round(btc_excess, 2),
+                "reason": f"btc_cap_{btc_cap:.0%}",
+            }
+        )
+        sell_usd += btc_excess
+        btc -= btc_excess
+        reasons.append("btc_cap")
+
+    satellite_mv = smh + btc
+    satellite_w = satellite_mv / total
+
+    if satellite_w >= satellite_trigger - 1e-12:
+        target_sat = satellite_target * total
+        trim = satellite_mv - target_sat
+        if trim > 1.0:
+            smh_sell = min(smh, trim)
+            rem = trim - smh_sell
+            if smh_sell > 1.0:
+                orders.append(
+                    {
+                        "action": "SELL",
+                        "symbol": "SMH",
+                        "amount_usd": round(smh_sell, 2),
+                        "reason": f"satellite>{satellite_trigger:.0%}→{satellite_target:.0%}",
+                    }
+                )
+                sell_usd += smh_sell
+                smh -= smh_sell
+            if rem > 1.0 and btc > 0:
+                btc_sell = min(btc, rem)
+                orders.append(
+                    {
+                        "action": "SELL",
+                        "symbol": "BTC-USD",
+                        "amount_usd": round(btc_sell, 2),
+                        "reason": "satellite_trim_remainder",
+                    }
+                )
+                sell_usd += btc_sell
+                btc -= btc_sell
+            reasons.append("satellite_band")
+
+    if sell_usd > 1.0:
+        orders.append(
+            {
+                "action": "BUY",
+                "symbol": "SPYL.L",
+                "amount_usd": round(sell_usd, 2),
+                "reason": "rebalance_proceeds→core",
+            }
+        )
+
+    triggered = any(o["action"] == "SELL" for o in orders)
+    post_total = total
+    post_weights = {
+        "SPYL.L": (spyl + sell_usd) / post_total if triggered else weights["SPYL.L"],
+        "SMH": smh / post_total,
+        "BTC-USD": btc / post_total,
+        "satellite": (smh + btc) / post_total,
+    }
+
+    return {
+        "triggered": triggered,
+        "reasons": reasons or ["within_band"],
+        "total_usd": round(total, 2),
+        "weights_before": {k: round(v, 4) for k, v in weights.items()},
+        "weights_after_est": {k: round(v, 4) for k, v in post_weights.items()},
+        "targets": {
+            "core": core_target,
+            "satellite": satellite_target,
+            "satellite_trigger": satellite_trigger,
+            "btc_cap": btc_cap,
+        },
+        "orders": orders,
+    }
 
 
 def get_smh_health():
@@ -1202,13 +1508,32 @@ def _print_execution_alert(data: dict, enable_telegram: bool = False) -> None:
             print("Telegram skipped (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).")
 
 
-def build_hard_data_export(entry_price=None, start_date=None):
-    """Pure numeric payload for monthly confluence / quarterly safety-valve checks."""
+def build_hard_data_export(entry_price=None, start_date=None, positions=None):
+    """Pure numeric payload for monthly confluence / quarterly checks."""
     corp = get_corporate_actions_adjustment(
         HARD_DATA_TICKER, start_date=start_date, entry_price=entry_price
     )
     pe = calculate_pe_percentile(HARD_DATA_TICKER)
     scissors = calculate_memory_scissors(window=20)
+
+    total_usd = btc_usd = None
+    if positions:
+        total_usd = float(sum(max(0.0, v) for v in positions.values()))
+        btc_usd = float(
+            positions.get("BTC-USD", positions.get("BTC", 0.0)) or 0.0
+        )
+
+    allocation = route_monthly_contribution(
+        portfolio_total_usd=total_usd,
+        btc_mv_usd=btc_usd,
+    )
+    rebalance = plan_rebalance(positions) if positions else {
+        "triggered": False,
+        "reason": "no_positions_file",
+        "orders": [],
+        "hint": f"Create {PORTFOLIO_POSITIONS_PATH.name} with USD market values.",
+    }
+
     return {
         "asof": datetime.now().isoformat(timespec="seconds"),
         "market": "US",
@@ -1216,28 +1541,65 @@ def build_hard_data_export(entry_price=None, start_date=None):
             "corporate_actions": corp,
             "pe_percentile": pe,
             "memory_scissors": scissors,
+            "monthly_allocation": allocation,
+            "rebalance": rebalance,
         },
         "gates": {
-            "valuation_safe": pe.get("is_valuation_safe"),
+            # valuation_safe is observe-only; does not block buys
+            "valuation_safe_observe": pe.get("is_valuation_safe"),
+            "valuation_gates_buys": False,
             "memory_bearish_veto": scissors.get("trigger_bearish"),
+            "smh_above_ma": (allocation.get("filters") or {}).get("SMH", {}).get(
+                "above_ma"
+            ),
+            "rebalance_triggered": rebalance.get("triggered"),
             "entry_adjustment_factor": corp.get("adjustment_factor"),
         },
         "disclaimer": (
-            "Hard numbers only. Not a trade instruction. "
-            "SMH PE uses trailingPE (Yahoo forwardPE usually null). "
-            "Memory scissors are equity proxies, not DRAM spot."
+            "Hard numbers + execution hints only. Not broker auto-trade. "
+            "PE is observational (does not gate buys). "
+            "Buys use 60MA filter; trims use 40%→30% satellite rebalance."
         ),
     }
 
 
-def export_hard_data_json(path=None, entry_price=None, start_date=None):
+def export_hard_data_json(path=None, entry_price=None, start_date=None, positions=None):
     """Write hard-data JSON for chat/system paste without narrative."""
     out_path = Path(path) if path else DEFAULT_JSON_EXPORT
-    payload = build_hard_data_export(entry_price=entry_price, start_date=start_date)
+    if positions is None:
+        positions = load_portfolio_positions()
+    payload = build_hard_data_export(
+        entry_price=entry_price, start_date=start_date, positions=positions
+    )
     out_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return out_path, payload
+
+
+def _print_ma_filter(ma: dict):
+    if not ma.get("ok"):
+        print(f"  {ma.get('symbol')}: MA n/a ({ma.get('reason', 'unknown')})")
+        return
+    side = "above" if ma.get("above_ma") else "BELOW"
+    print(
+        f"  {ma['symbol']}: {ma['price']:.2f} | {ma['window']}MA {ma['ma']:.2f} | "
+        f"{side} ({ma['pct_from_ma']:+.1f}%)"
+    )
+
+
+def _print_orders(orders, money_key="amount_hkd", money_label="HKD"):
+    if not orders:
+        print("  (no orders)")
+        return
+    for o in orders:
+        amt = o.get(money_key)
+        if amt is None:
+            amt = o.get("amount_usd")
+            money_label = "USD"
+        print(
+            f"  {o['action']:4} {o['symbol']}: {amt:.2f} {money_label}  [{o.get('reason')}]"
+        )
 
 
 def _print_hard_data(payload):
@@ -1245,6 +1607,9 @@ def _print_hard_data(payload):
     corp = payload["modules"]["corporate_actions"]
     pe = payload["modules"]["pe_percentile"]
     scissors = payload["modules"]["memory_scissors"]
+    allocation = payload["modules"].get("monthly_allocation") or {}
+    rebalance = payload["modules"].get("rebalance") or {}
+
     print(
         f"Corporate actions ({corp['ticker']} {corp['start_date']}→{corp['end_date']}): "
         f"factor={corp['adjustment_factor']:.6f} | "
@@ -1252,13 +1617,15 @@ def _print_hard_data(payload):
     )
     if corp.get("new_entry") is not None:
         print(f"  Rebased entry: {corp['new_entry']:.4f}")
+
     pe_txt = f"{pe['trailing_pe']:.2f}" if pe.get("trailing_pe") is not None else "n/a"
     pct_txt = f"{pe['percentile']:.1f}" if pe.get("percentile") is not None else "n/a"
     print(
-        f"SMH PE lock: trailingPE={pe_txt} | percentile={pct_txt} "
-        f"(n={pe['history_count']}) | is_valuation_safe={pe['is_valuation_safe']} "
-        f"| ceiling={pe['pe_ceiling']}"
+        f"SMH PE (observe only): trailingPE={pe_txt} | percentile={pct_txt} "
+        f"(n={pe['history_count']}) | valuation_safe={pe['is_valuation_safe']} "
+        f"| gates_buys={pe.get('gates_buys', False)} | ceiling={pe['pe_ceiling']}"
     )
+
     mu = scissors.get("mu_vs_smh_bps")
     hx = scissors.get("hynix_vs_smh_bps")
     mu_txt = f"{mu:+.0f}" if mu is not None else "n/a"
@@ -1268,15 +1635,56 @@ def _print_hard_data(payload):
         f"000660.KS {hx_txt} bps | trigger_bearish={scissors['trigger_bearish']} "
         f"(both < {scissors['threshold_bps']} bps)"
     )
+
+    print(
+        f"\nMonthly allocation router "
+        f"(contrib {allocation.get('contrib_hkd', MONTHLY_CONTRIB_HKD):.0f} HKD + "
+        f"BTC {allocation.get('btc_add_hkd', BTC_ADD_HKD):.0f}):"
+    )
+    filters = allocation.get("filters") or {}
+    _print_ma_filter(filters.get("SMH") or {"symbol": "SMH", "ok": False, "reason": "n/a"})
+    _print_ma_filter(
+        filters.get("BTC-USD") or {"symbol": "BTC-USD", "ok": False, "reason": "n/a"}
+    )
+    routes = allocation.get("routes") or {}
+    print(
+        f"  Routes: core→{routes.get('core')} | "
+        f"sat30→{routes.get('satellite_30pct')} | "
+        f"btc→{routes.get('btc_add')}"
+    )
+    _print_orders(allocation.get("orders") or [])
+
+    print(
+        f"\nRebalance "
+        f"(trigger sat≥{SATELLITE_TRIGGER_PCT:.0%} → target {SATELLITE_TARGET_PCT:.0%}; "
+        f"BTC cap {BTC_WEIGHT_CAP:.0%}): "
+        f"triggered={rebalance.get('triggered')} | reasons={rebalance.get('reasons') or rebalance.get('reason')}"
+    )
+    if rebalance.get("weights_before"):
+        wb = rebalance["weights_before"]
+        print(
+            f"  Weights: SPYL {wb.get('SPYL.L', 0):.1%} | SMH {wb.get('SMH', 0):.1%} | "
+            f"BTC {wb.get('BTC-USD', 0):.1%} | satellite {wb.get('satellite', 0):.1%}"
+        )
+    _print_orders(rebalance.get("orders") or [], money_key="amount_usd", money_label="USD")
+
     gates = payload["gates"]
     print(
-        f"Gates: valuation_safe={gates['valuation_safe']} | "
-        f"memory_bearish_veto={gates['memory_bearish_veto']} | "
-        f"entry_adjustment_factor={gates['entry_adjustment_factor']:.6f}"
+        f"\nGates: valuation_observe={gates.get('valuation_safe_observe')} "
+        f"(buys_blocked=False) | "
+        f"smh_above_ma={gates.get('smh_above_ma')} | "
+        f"memory_veto={gates.get('memory_bearish_veto')} | "
+        f"rebalance={gates.get('rebalance_triggered')}"
     )
 
 
-def print_prices(telegram: bool = False, export_json=None, entry_price=None, hard_data=False):
+def print_prices(
+    telegram: bool = False,
+    export_json=None,
+    entry_price=None,
+    hard_data=False,
+    portfolio_path=None,
+):
     """Print equities, US rates/credit, SMH health, market structure.
 
     Default: dashboard only — does NOT write smh_pe_history.csv or JSON.
@@ -1340,9 +1748,57 @@ def print_prices(telegram: bool = False, export_json=None, entry_price=None, har
     structure_data = get_market_structure()
     _print_market_structure(structure_data)
 
-    # Optional: PE history + JSON hard-data modules (off by default).
+    # Always show MA contribution router + rebalance hints (no PE CSV write).
+    positions = load_portfolio_positions(portfolio_path)
+    total_usd = btc_usd = None
+    if positions:
+        total_usd = float(sum(max(0.0, v) for v in positions.values()))
+        btc_usd = float(positions.get("BTC-USD", positions.get("BTC", 0.0)) or 0.0)
+    allocation = route_monthly_contribution(
+        portfolio_total_usd=total_usd, btc_mv_usd=btc_usd
+    )
+    rebalance = (
+        plan_rebalance(positions)
+        if positions
+        else {
+            "triggered": False,
+            "reason": "no_positions_file",
+            "orders": [],
+        }
+    )
+    print("\n--- US Execution Hints (MA filter + rebalance; PE not a buy gate) ---")
+    filters = allocation.get("filters") or {}
+    _print_ma_filter(filters.get("SMH") or {"symbol": "SMH", "ok": False, "reason": "n/a"})
+    _print_ma_filter(
+        filters.get("BTC-USD") or {"symbol": "BTC-USD", "ok": False, "reason": "n/a"}
+    )
+    routes = allocation.get("routes") or {}
+    print(
+        f"Monthly routes: core→{routes.get('core')} | "
+        f"sat30→{routes.get('satellite_30pct')} | btc→{routes.get('btc_add')}"
+    )
+    _print_orders(allocation.get("orders") or [])
+    print(
+        f"Rebalance: triggered={rebalance.get('triggered')} | "
+        f"{rebalance.get('reasons') or rebalance.get('reason')}"
+    )
+    if rebalance.get("weights_before"):
+        wb = rebalance["weights_before"]
+        print(
+            f"  Weights: SPYL {wb.get('SPYL.L', 0):.1%} | SMH {wb.get('SMH', 0):.1%} | "
+            f"BTC {wb.get('BTC-USD', 0):.1%} | sat {wb.get('satellite', 0):.1%}"
+        )
+    _print_orders(rebalance.get("orders") or [], money_key="amount_usd", money_label="USD")
+    if not positions:
+        tip_path = Path(portfolio_path) if portfolio_path else PORTFOLIO_POSITIONS_PATH
+        print(
+            f"  Tip: add {tip_path.name} "
+            "(USD market values) for BTC cap + rebalance math."
+        )
+
+    # Optional: PE history + full hard-data JSON (off by default).
     if hard_data or export_json is not None:
-        hard = build_hard_data_export(entry_price=entry_price)
+        hard = build_hard_data_export(entry_price=entry_price, positions=positions)
         _print_hard_data(hard)
         if export_json is not None:
             out_path = Path(export_json) if export_json else DEFAULT_JSON_EXPORT
@@ -1388,13 +1844,49 @@ if __name__ == "__main__":
         action="store_true",
         help="Print/export hard-data JSON only (skip full dashboard).",
     )
+    parser.add_argument(
+        "--portfolio",
+        default=None,
+        metavar="PATH",
+        help=f"USD market-value JSON for rebalance/BTC cap (default: {PORTFOLIO_POSITIONS_PATH.name}).",
+    )
+    parser.add_argument(
+        "--allocate-only",
+        action="store_true",
+        help="Print monthly MA router + rebalance orders only.",
+    )
     args = parser.parse_args()
+    portfolio_path = Path(args.portfolio) if args.portfolio else PORTFOLIO_POSITIONS_PATH
 
     try:
-        if args.json_only:
+        if args.allocate_only:
+            positions = load_portfolio_positions(portfolio_path)
+            total_usd = btc_usd = None
+            if positions:
+                total_usd = float(sum(max(0.0, v) for v in positions.values()))
+                btc_usd = float(
+                    positions.get("BTC-USD", positions.get("BTC", 0.0)) or 0.0
+                )
+            allocation = route_monthly_contribution(
+                portfolio_total_usd=total_usd, btc_mv_usd=btc_usd
+            )
+            rebalance = (
+                plan_rebalance(positions)
+                if positions
+                else {"triggered": False, "reason": "no_positions_file", "orders": []}
+            )
+            print(
+                json.dumps(
+                    {"monthly_allocation": allocation, "rebalance": rebalance},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        elif args.json_only:
             path, payload = export_hard_data_json(
                 path=args.export_json or DEFAULT_JSON_EXPORT,
                 entry_price=args.entry_price,
+                positions=load_portfolio_positions(portfolio_path),
             )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             print(f"\nWrote {path}")
@@ -1404,6 +1896,7 @@ if __name__ == "__main__":
                 export_json=args.export_json,
                 entry_price=args.entry_price,
                 hard_data=args.hard_data,
+                portfolio_path=portfolio_path,
             )
         else:
             if args.live <= 0:
@@ -1414,6 +1907,7 @@ if __name__ == "__main__":
                     export_json=args.export_json,
                     entry_price=args.entry_price,
                     hard_data=args.hard_data,
+                    portfolio_path=portfolio_path,
                 )
                 print("-" * 50)
                 time.sleep(args.live)
