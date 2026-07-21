@@ -68,7 +68,8 @@ CREDIT_SPREAD_SIGNAL_BPS = 220
 CREDIT_VELOCITY_SIGNAL_BPS = 20
 SIGNAL_BANNER = "!" * 60
 EXECUTION_ALERT_MSG = (
-    "【核彈級買點】指標已達標，立刻登入 IBKR 賣出 IB01，分批滿倉 SMH！"
+    "【CREDIT ALERT】利差/速度觸發 — 僅警報，不自動賣 IB01、不自動買 SMH。"
+    " 請對照 60MA 分流與再平衡指令，勿把信用尖刺當抄底訊號。"
 )
 ADJ_CLOSE_SYMBOLS = frozenset({"HYG", "IEF", "IB01.L", "IB01"})
 SMH_DMA_TICKERS = ("SMH", "^SOX")
@@ -125,6 +126,8 @@ SATELLITE_TARGET_PCT = 0.30
 SATELLITE_TRIGGER_PCT = 0.40
 BTC_WEIGHT_CAP = 0.05
 FX_HKD_PER_USD = 7.8
+# Soft hint: cash + IB01 above this weight → suggest rotate idle cash to SPYL.
+CASH_IB01_HINT_PCT = 0.10
 
 
 def _parse_trailing_pe(raw):
@@ -740,51 +743,64 @@ def route_monthly_contribution(
         )
         satellite_route = "SPYL.L"
 
-    btc_allowed = True
-    btc_reason = f"fixed_add_{btc_add_hkd:.0f}_hkd"
-    if (
-        portfolio_total_usd is not None
-        and btc_mv_usd is not None
-        and portfolio_total_usd > 0
-    ):
-        projected = (btc_mv_usd + btc_add_hkd / FX_HKD_PER_USD) / (
-            portfolio_total_usd + btc_add_hkd / FX_HKD_PER_USD
-        )
-        if projected > BTC_WEIGHT_CAP:
-            btc_allowed = False
-            btc_reason = f"btc_cap_{BTC_WEIGHT_CAP:.0%}_overflow→SPYL"
+    # BTC sleeve: MA filter first, then partial-fill to 5% cap (remainder → SPYL).
+    btc_hkd = float(btc_add_hkd)
+    spyl_from_btc_hkd = 0.0
+    btc_route = "BTC-USD"
 
-    if btc_allowed:
-        if btc_ma.get("ok") and not btc_ma.get("above_ma"):
-            orders.append(
-                {
-                    "action": "BUY",
-                    "symbol": "SPYL.L",
-                    "amount_hkd": round(btc_add_hkd, 3),
-                    "reason": f"btc_below_{ma_window}MA→SPYL",
-                }
-            )
-            btc_route = "SPYL.L"
-        else:
-            orders.append(
-                {
-                    "action": "BUY",
-                    "symbol": "BTC-USD",
-                    "amount_hkd": round(btc_add_hkd, 3),
-                    "reason": btc_reason,
-                }
-            )
-            btc_route = "BTC-USD"
+    if btc_ma.get("ok") and not btc_ma.get("above_ma"):
+        spyl_from_btc_hkd = btc_hkd
+        btc_hkd = 0.0
+        btc_route = "SPYL.L"
+        btc_reason = f"btc_below_{ma_window}MA→SPYL"
     else:
+        btc_reason = f"fixed_add_{btc_add_hkd:.0f}_hkd"
+        if (
+            portfolio_total_usd is not None
+            and btc_mv_usd is not None
+            and portfolio_total_usd > 0
+            and btc_hkd > 0
+        ):
+            add_usd = btc_hkd / FX_HKD_PER_USD
+            # Max USD that keeps post-trade BTC weight <= cap:
+            # (btc + x) / (total + x) <= cap  =>  x <= (cap*total - btc) / (1 - cap)
+            room_usd = (BTC_WEIGHT_CAP * portfolio_total_usd - btc_mv_usd) / (
+                1.0 - BTC_WEIGHT_CAP
+            )
+            room_usd = max(0.0, room_usd)
+            fill_usd = min(add_usd, room_usd)
+            btc_hkd = fill_usd * FX_HKD_PER_USD
+            spyl_from_btc_hkd = (add_usd - fill_usd) * FX_HKD_PER_USD
+            if spyl_from_btc_hkd > 0.01:
+                btc_reason = (
+                    f"btc_partial_to_{BTC_WEIGHT_CAP:.0%}_cap;"
+                    f" remainder→SPYL"
+                )
+                btc_route = "BTC-USD+SPYL.L" if btc_hkd > 0.01 else "SPYL.L"
+            elif btc_hkd <= 0.01:
+                btc_route = "SPYL.L"
+                btc_reason = f"btc_already_at_{BTC_WEIGHT_CAP:.0%}_cap→SPYL"
+
+    if btc_hkd > 0.01:
+        orders.append(
+            {
+                "action": "BUY",
+                "symbol": "BTC-USD",
+                "amount_hkd": round(btc_hkd, 3),
+                "reason": btc_reason,
+            }
+        )
+    if spyl_from_btc_hkd > 0.01:
         orders.append(
             {
                 "action": "BUY",
                 "symbol": "SPYL.L",
-                "amount_hkd": round(btc_add_hkd, 3),
-                "reason": btc_reason,
+                "amount_hkd": round(spyl_from_btc_hkd, 3),
+                "reason": btc_reason
+                if btc_hkd <= 0.01
+                else f"btc_cap_remainder→SPYL",
             }
         )
-        btc_route = "SPYL.L"
 
     return {
         "asof": datetime.now().isoformat(timespec="seconds"),
@@ -824,6 +840,7 @@ def plan_rebalance(
     satellite_target: float = SATELLITE_TARGET_PCT,
     core_target: float = CORE_TARGET_PCT,
     btc_cap: float = BTC_WEIGHT_CAP,
+    cash_hint_pct: float = CASH_IB01_HINT_PCT,
 ):
     """
     Check weights → compute sell SMH/BTC → buy SPYL instructions.
@@ -831,6 +848,7 @@ def plan_rebalance(
     Triggers when (SMH + BTC) / total >= satellite_trigger (default 40%).
     Trims satellite sleeve back to satellite_target (default 30%).
     Also enforces BTC hard cap independently.
+    Soft HINT if CASH+IB01 > cash_hint_pct (default 10%) → rotate idle cash to SPYL.
     Does not place orders — returns an instruction list only.
     """
     if not positions:
@@ -838,18 +856,28 @@ def plan_rebalance(
             "triggered": False,
             "reason": "no_positions",
             "orders": [],
+            "hints": [],
         }
 
     total = float(sum(max(0.0, v) for v in positions.values()))
     if total <= 0:
-        return {"triggered": False, "reason": "zero_total", "orders": [], "total_usd": 0.0}
+        return {
+            "triggered": False,
+            "reason": "zero_total",
+            "orders": [],
+            "hints": [],
+            "total_usd": 0.0,
+        }
 
     spyl = float(positions.get("SPYL.L", positions.get("SPYL", 0.0)) or 0.0)
     smh = float(positions.get("SMH", 0.0) or 0.0)
     btc = float(positions.get("BTC-USD", positions.get("BTC", 0.0)) or 0.0)
-    cash = float(positions.get("CASH", 0.0) or 0.0) + float(
-        positions.get("IB01.L", positions.get("IB01", positions.get("SGOV", 0.0))) or 0.0
+    cash_only = float(positions.get("CASH", 0.0) or 0.0)
+    ib01 = float(
+        positions.get("IB01.L", positions.get("IB01", positions.get("SGOV", 0.0)))
+        or 0.0
     )
+    cash = cash_only + ib01
     other = total - spyl - smh - btc - cash
 
     weights = {
@@ -863,6 +891,7 @@ def plan_rebalance(
     }
 
     orders = []
+    hints = []
     sell_usd = 0.0
     reasons = []
 
@@ -924,6 +953,42 @@ def plan_rebalance(
             }
         )
 
+    # Soft hint: idle cash/IB01 above band — suggest rotate to SPYL (not auto-forced).
+    cash_w = cash / total
+    if cash_w > cash_hint_pct + 1e-12:
+        excess_cash = cash - cash_hint_pct * total
+        # Prefer rotating IB01 first, then CASH.
+        ib01_sell = min(ib01, excess_cash)
+        cash_sell = min(cash_only, max(0.0, excess_cash - ib01_sell))
+        if ib01_sell > 1.0:
+            hints.append(
+                {
+                    "action": "HINT_SELL",
+                    "symbol": "IB01.L",
+                    "amount_usd": round(ib01_sell, 2),
+                    "reason": f"CASH+IB01>{cash_hint_pct:.0%}_idle→consider_SPYL",
+                }
+            )
+        if cash_sell > 1.0:
+            hints.append(
+                {
+                    "action": "HINT_SELL",
+                    "symbol": "CASH",
+                    "amount_usd": round(cash_sell, 2),
+                    "reason": f"CASH+IB01>{cash_hint_pct:.0%}_idle→consider_SPYL",
+                }
+            )
+        if ib01_sell + cash_sell > 1.0:
+            hints.append(
+                {
+                    "action": "HINT_BUY",
+                    "symbol": "SPYL.L",
+                    "amount_usd": round(ib01_sell + cash_sell, 2),
+                    "reason": "rotate_idle_cash→core",
+                }
+            )
+            reasons.append("cash_ib01_hint")
+
     triggered = any(o["action"] == "SELL" for o in orders)
     post_total = total
     post_weights = {
@@ -931,6 +996,7 @@ def plan_rebalance(
         "SMH": smh / post_total,
         "BTC-USD": btc / post_total,
         "satellite": (smh + btc) / post_total,
+        "CASH+IB01": cash_w,
     }
 
     return {
@@ -944,8 +1010,10 @@ def plan_rebalance(
             "satellite": satellite_target,
             "satellite_trigger": satellite_trigger,
             "btc_cap": btc_cap,
+            "cash_ib01_hint": cash_hint_pct,
         },
         "orders": orders,
+        "hints": hints,
     }
 
 
@@ -1664,9 +1732,14 @@ def _print_hard_data(payload):
         wb = rebalance["weights_before"]
         print(
             f"  Weights: SPYL {wb.get('SPYL.L', 0):.1%} | SMH {wb.get('SMH', 0):.1%} | "
-            f"BTC {wb.get('BTC-USD', 0):.1%} | satellite {wb.get('satellite', 0):.1%}"
+            f"BTC {wb.get('BTC-USD', 0):.1%} | satellite {wb.get('satellite', 0):.1%} | "
+            f"CASH+IB01 {wb.get('CASH+IB01', 0):.1%}"
         )
     _print_orders(rebalance.get("orders") or [], money_key="amount_usd", money_label="USD")
+    hints = rebalance.get("hints") or []
+    if hints:
+        print("  Idle-cash hints (not auto-trade):")
+        _print_orders(hints, money_key="amount_usd", money_label="USD")
 
     gates = payload["gates"]
     print(
@@ -1786,9 +1859,14 @@ def print_prices(
         wb = rebalance["weights_before"]
         print(
             f"  Weights: SPYL {wb.get('SPYL.L', 0):.1%} | SMH {wb.get('SMH', 0):.1%} | "
-            f"BTC {wb.get('BTC-USD', 0):.1%} | sat {wb.get('satellite', 0):.1%}"
+            f"BTC {wb.get('BTC-USD', 0):.1%} | sat {wb.get('satellite', 0):.1%} | "
+            f"CASH+IB01 {wb.get('CASH+IB01', 0):.1%}"
         )
     _print_orders(rebalance.get("orders") or [], money_key="amount_usd", money_label="USD")
+    hints = rebalance.get("hints") or []
+    if hints:
+        print("  Idle-cash hints (not auto-trade):")
+        _print_orders(hints, money_key="amount_usd", money_label="USD")
     if not positions:
         tip_path = Path(portfolio_path) if portfolio_path else PORTFOLIO_POSITIONS_PATH
         print(
